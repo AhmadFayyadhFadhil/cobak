@@ -184,3 +184,17 @@ def test_save_backtest_report_json(tmp_path: Path) -> None:
     save_backtest_report(res, "MT5-Demo", "2026-03-01 s/d 2026-11-27", out_path=out_json)
     assert out_json.exists()
     assert '"total_m5_bars": 100' in out_json.read_text(encoding="utf-8")
+
+
+def test_data_loader_histdata_headerless_est_conversion(tmp_path: Path) -> None:
+    """File HistData tanpa header (; separated, EST UTC-5) otomatis dikonversi ke UTC."""
+    csv_path = tmp_path / "DAT_ASCII_XAUUSD_M1_2020.csv"
+    csv_path.write_text(
+        "20200102 020000;1517.25;1517.80;1517.10;1517.60;0\n"
+        "20200102 020100;1517.60;1518.00;1517.50;1517.90;0\n",
+        encoding="utf-8",
+    )
+    df = load_ohlcv_file(csv_path, default_spread_points=25.0)
+    assert len(df) == 2
+    # 02:00 EST (UTC-5) == 07:00 UTC
+    assert df["time_utc"].iloc[0] == pd.Timestamp("2020-01-02 07:00:00+00:00")
