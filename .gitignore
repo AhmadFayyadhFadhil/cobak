@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.venv/
+logs/
+data/*.db
+data/*.db-wal
+data/*.db-shm
+data/spread_samples.csv
+.pytest_cache/

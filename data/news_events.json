@@ -1,0 +1,6 @@
+{
+  "updated_at_utc": "2026-11-27T00:00:00Z",
+  "source": "manual_initial_template",
+  "notes": "Isi jadwal CPI, NFP, dan FOMC High Impact USD dalam UTC. Fail-closed jika file tidak valid atau melewati news_max_age_hours.",
+  "events": []
+}
