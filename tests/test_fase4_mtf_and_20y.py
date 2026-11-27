@@ -172,3 +172,15 @@ def test_20y_regime_breakdown_news_coverage_and_atr_relative_trail() -> None:
     )
     assert isinstance(res.regime_breakdown, dict)
     assert "PERINGATAN" in res.news_coverage_note or "2024" in res.news_coverage_note
+
+
+def test_save_backtest_report_json(tmp_path: Path) -> None:
+    """save_backtest_report menghasilkan JSON valid untuk dibaca dashboard Streamlit."""
+    from backtest.engine import BacktestResult
+    from run_backtest import save_backtest_report
+
+    out_json = tmp_path / "bt.json"
+    res = BacktestResult([], 1000.0, 1000.0, 0, 0.0, 0.0, 0.0, 0.0, {"total_m5_bars": 100})
+    save_backtest_report(res, "MT5-Demo", "2026-03-01 s/d 2026-11-27", out_path=out_json)
+    assert out_json.exists()
+    assert '"total_m5_bars": 100' in out_json.read_text(encoding="utf-8")

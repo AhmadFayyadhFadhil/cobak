@@ -6,4 +6,5 @@ data/*.db
 data/*.db-wal
 data/*.db-shm
 data/spread_samples.csv
+data/backtest_latest.json
 .pytest_cache/

@@ -561,6 +561,11 @@ class BacktestEngine:
                 m1_start = int(np.searchsorted(m1_ns, cur_ns, side="right"))
                 horizon_ns = cur_ns + int(48 * 3600 * 1e9)
                 m1_end = int(np.searchsorted(m1_ns, horizon_ns, side="right"))
+                intrabar_slice = m1.iloc[m1_start:m1_end]
+                # Jika histori M1 broker tidak menjangkau bar ini, fallback ke bar M5
+                if intrabar_slice.empty:
+                    m5_end = int(np.searchsorted(m5_ns, horizon_ns, side="right"))
+                    intrabar_slice = m5.iloc[i + 1 : m5_end]
                 outcome = simulate_trade_intrabar_m1(
                     direction=act.direction,
                     limit_price=act.limit_price,
@@ -568,7 +573,7 @@ class BacktestEngine:
                     tp_1_2_price=act.tp_1_2_price,
                     tp_final_price=act.tp_price,
                     atr_m5=atr_val,
-                    m1_slice=m1.iloc[m1_start:m1_end],
+                    m1_slice=intrabar_slice,
                     expiry_utc=now_utc + timedelta(hours=self.cfg.pending_order_expiry_hours),
                     session_end_hhmm=self.cfg.session_end_utc,
                     point=self.point,

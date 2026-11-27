@@ -20,8 +20,10 @@ if ROOT_DIR not in sys.path:
 
 import pandas as pd
 
-from config import CONFIG, DB_PATH
+from config import CONFIG, DATA_DIR, DB_PATH
 from core.state_manager import StateManager
+
+BACKTEST_REPORT_JSON = DATA_DIR / "backtest_latest.json"
 
 
 def build_six_cards_snapshot(
@@ -166,6 +168,28 @@ def render_streamlit_dashboard() -> None:
                 use_container_width=True,
                 hide_index=True,
             )
+
+    if BACKTEST_REPORT_JSON.exists():
+        st.divider()
+        st.subheader("Hasil Backtest Terakhir")
+        try:
+            bt = json.loads(BACKTEST_REPORT_JSON.read_text(encoding="utf-8"))
+            c1, c2, c3, c4, c5 = st.columns(5)
+            c1.metric("Total Trade", bt.get("total_trades", 0))
+            c2.metric("Win Rate", f"{bt.get('win_rate', 0.0):.1f}%")
+            c3.metric("Profit Factor", f"{bt.get('profit_factor', 0.0):.2f}")
+            c4.metric("Expectancy", f"{bt.get('expectancy_r', 0.0):.2f}R")
+            c5.metric("Max Drawdown", f"{bt.get('max_drawdown_pct', 0.0):.2f}%")
+            st.caption(
+                f"Sumber: {bt.get('source', '-')} | Periode: {bt.get('date_range', '-')} | "
+                f"Saldo: ${bt.get('initial_balance', 0):,.2f} -> ${bt.get('final_balance', 0):,.2f}"
+            )
+            if bt.get("news_coverage_note"):
+                st.info(bt["news_coverage_note"])
+            if bt.get("trades"):
+                st.dataframe(pd.DataFrame(bt["trades"]), use_container_width=True, hide_index=True)
+        except Exception as exc:  # noqa: BLE001
+            st.warning(f"Gagal memuat laporan backtest: {exc}")
 
 
 if __name__ == "__main__":
