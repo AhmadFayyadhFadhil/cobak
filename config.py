@@ -87,6 +87,7 @@ class BotConfig:
     zone_armed_timeout_hours: float = 36.0  # 36 jam (~36 bar H1) untuk H1 mode
     max_fvg_wait_candles_m5: int = 5  # 3-6 candle setelah CHoCH
     pending_order_expiry_hours: float = 12.0  # Maksimal batas expiry pending order
+    fvg_proximal_offset_ratio: float = 0.5  # 0.5 = 50% FVG; 0.2 = dekat tepi FVG menghadap harga
 
     # --- 6. Guardrails Anti-Ganas & Eksekusi ---
     # Gunakan batas spread dalam jarak harga USD agar kebal perbedaan broker 2-digit vs 3-digit.

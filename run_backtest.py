@@ -112,11 +112,20 @@ def main(
     dxy_csv: Optional[Path],
     atr_relative: bool,
     utc_offset: int = 2,
+    fvg_ratio: Optional[float] = None,
+    trail_atr: Optional[float] = None,
+    pending_expiry: Optional[float] = None,
     save_json: bool = True,
 ) -> BacktestResult:
     cfg = CONFIG
     if atr_relative:
         cfg = replace(cfg, max_spread_atr_ratio=0.25, min_trail_step_atr_ratio=0.15)
+    if fvg_ratio is not None:
+        cfg = replace(cfg, fvg_proximal_offset_ratio=fvg_ratio)
+    if trail_atr is not None:
+        cfg = replace(cfg, trailing_atr_multiplier=trail_atr)
+    if pending_expiry is not None:
+        cfg = replace(cfg, pending_order_expiry_hours=pending_expiry)
 
     if source == "mt5":
         dataset, point, source_label = _fetch_mt5_dataset(cfg)
@@ -198,6 +207,19 @@ if __name__ == "__main__":
     parser.add_argument("--xau", type=Path, default=None)
     parser.add_argument("--dxy", type=Path, default=None)
     parser.add_argument("--utc-offset", type=int, default=2, help="Offset server export MT5 CSV terhadap UTC")
+    parser.add_argument("--fvg-ratio", type=float, default=None, help="Rasio posisi limit FVG (0.5=tengah, 0.2=tepi proksimal)")
+    parser.add_argument("--trail-atr", type=float, default=None, help="Multiplier ATR trailing setelah 1:2 (0=BEP saja menuju 1:5)")
+    parser.add_argument("--pending-expiry", type=float, default=None, help="Masa berlaku pending limit order (jam)")
     parser.add_argument("--atr-relative", action="store_true", help="Gunakan spread & trail berbasis ATR (untuk 10-20 tahun)")
     args = parser.parse_args()
-    main(args.source, args.balance, args.xau, args.dxy, args.atr_relative, utc_offset=args.utc_offset)
+    main(
+        args.source,
+        args.balance,
+        args.xau,
+        args.dxy,
+        args.atr_relative,
+        utc_offset=args.utc_offset,
+        fvg_ratio=args.fvg_ratio,
+        trail_atr=args.trail_atr,
+        pending_expiry=args.pending_expiry,
+    )

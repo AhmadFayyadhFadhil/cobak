@@ -7,6 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Literal, Optional, Sequence
 
+import numpy as np
 import pandas as pd
 
 from strategy.indicators import detect_confirmed_pivots
@@ -78,15 +79,16 @@ def detect_bos_and_fresh_zones(
 
         # Zona dianggap tidak fresh jika sudah disentuh sebelum bar terakhir atau ditembus close
         is_fresh = True
-        for k in range(bos_idx + 1, len(df) - 1):
+        if bos_idx + 1 < len(df) - 1:
+            mid_closes = closes[bos_idx + 1 : -1]
             if bias == "BUY":
-                if closes[k] < z_low or lows[k] <= z_high:
+                mid_lows = lows[bos_idx + 1 : -1]
+                if bool(np.any(mid_closes < z_low) or np.any(mid_lows <= z_high)):
                     is_fresh = False
-                    break
             else:
-                if closes[k] > z_high or highs[k] >= z_low:
+                mid_highs = highs[bos_idx + 1 : -1]
+                if bool(np.any(mid_closes > z_high) or np.any(mid_highs >= z_low)):
                     is_fresh = False
-                    break
 
         # Cek invalidasi di bar paling akhir (jika close langsung menembus ekstrem zona)
         if is_fresh:

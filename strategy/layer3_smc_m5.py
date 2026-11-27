@@ -287,7 +287,13 @@ def advance_smc_state_machine(
             )
 
         fvg_low, fvg_high = fvg
-        limit_price = (fvg_low + fvg_high) / 2.0
+        fvg_span = fvg_high - fvg_low
+        ratio = min(1.0, max(0.0, cfg.fvg_proximal_offset_ratio))
+        limit_price = (
+            (fvg_high - ratio * fvg_span)
+            if direction == "BUY"
+            else (fvg_low + ratio * fvg_span)
+        )
         atr_val = float(compute_atr(m5_df, cfg.atr_period).iloc[-1])
         sweep_ext = float(st.sweep_extreme if st.sweep_extreme is not None else limit_price)
         buffer = cfg.sl_atr_multiplier * atr_val

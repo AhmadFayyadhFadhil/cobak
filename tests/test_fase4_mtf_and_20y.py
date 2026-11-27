@@ -231,3 +231,62 @@ def test_data_loader_mt5_tab_export_zero_spread_and_h1_backtest_mode(tmp_path: P
         initial_balance=2000.0,
     )
     assert res.funnel["total_m5_bars"] == len(mtf["H1"]) - 25
+
+
+def test_h1_bep_only_trail_off_and_fvg_proximal_entry(tmp_path: Path) -> None:
+    """trailing_atr_multiplier=0.0 membiarkan sisa 50% menuju 1:5 tanpa trail; fvg_proximal_offset_ratio=0.25 menempatkan limit di tepi proksimal FVG."""
+    act_hold = evaluate_active_position_actions(
+        direction="BUY",
+        entry_price=2000.0,
+        initial_sl=1990.0,
+        current_sl=2000.5,
+        current_bid=2035.0,
+        current_ask=2035.3,
+        current_volume=0.02,
+        volume_min=0.01,
+        atr_m5=5.0,
+        partial_done=True,
+        allow_partial=True,
+        cfg=BotConfig(trailing_atr_multiplier=0.0),
+    )
+    assert act_hold.new_sl is None
+    assert act_hold.reason == "HOLD"
+
+    # Uji fvg_proximal_offset_ratio=0.25 pada setup BUY
+    from strategy.layer3_smc_m5 import advance_smc_state_machine
+
+    sm = StateManager(tmp_path / "h1_fvg.db")
+    t0 = datetime(2026, 11, 24, 7, 0, tzinfo=timezone.utc)
+    warm_o = [2003.0] * 10
+    warm_c = [2003.1] * 10
+    warm_h = [2003.4] * 10
+    warm_l = [2002.8] * 10
+    opens = warm_o + [2003.0, 2002.5, 2001.5, 2001.0, 2001.2, 2002.5, 2003.5, 2003.0, 2002.0, 2001.3, 2001.0, 2004.0]
+    closes = warm_c + [2002.5, 2001.5, 2001.0, 2001.2, 2002.5, 2003.5, 2003.0, 2002.0, 2001.3, 2001.0, 2004.0, 2008.0]
+    highs = warm_h + [2003.5, 2003.0, 2002.0, 2001.8, 2003.0, 2004.2, 2003.8, 2003.2, 2002.2, 2001.5, 2004.5, 2008.5]
+    lows = warm_l + [2002.2, 2001.2, 2000.6, 2000.0, 2000.8, 2002.2, 2002.5, 2001.5, 1999.0, 2000.8, 2000.9, 2003.8]
+    h1_df = pd.DataFrame(
+        {
+            "time_utc": pd.date_range(t0, periods=len(closes), freq="1h", tz="UTC"),
+            "open": opens,
+            "high": highs,
+            "low": lows,
+            "close": closes,
+            "tick_volume": [100.0] * len(closes),
+        }
+    )
+    zone = SupplyDemandZone("H4_DEM", "H4", "BUY", 1998.0, 2002.0, t0.isoformat(), True)
+    cfg = BotConfig(
+        entry_timeframe="H1",
+        fvg_proximal_offset_ratio=0.25,
+        pivot_window=2,
+        zone_armed_timeout_hours=36.0,
+        require_tick_volume_filter=False,
+    )
+    advance_smc_state_machine(sm, h1_df.iloc[:19].copy(), zone, h1_df["time_utc"].iloc[18].to_pydatetime(), True, cfg)
+    for idx in (19, 20):
+        advance_smc_state_machine(sm, h1_df.iloc[: idx + 1].copy(), zone, h1_df["time_utc"].iloc[idx].to_pydatetime(), True, cfg)
+    act = advance_smc_state_machine(sm, h1_df.iloc[:22].copy(), zone, h1_df["time_utc"].iloc[21].to_pydatetime(), True, cfg)
+    assert act.action == "PLACE_LIMIT"
+    # FVG = [2001.5, 2003.8] (lebar 2.3) -> 25% dari atas = 2003.8 - 0.25 * 2.3 = 2003.225
+    assert act.limit_price == pytest.approx(2003.8 - 0.25 * (2003.8 - 2001.5), abs=1e-4)

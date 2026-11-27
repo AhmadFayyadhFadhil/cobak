@@ -169,8 +169,8 @@ def evaluate_active_position_actions(
             reason="HIT_1_2_PARTIAL_AND_BEP",
         )
 
-    # Fase 2: Setelah melewati 1:2 (partial_done), jalankan ATR Trailing Stop dengan hysteresis step
-    if partial_done and atr_m5 > 0:
+    # Fase 2: Setelah melewati 1:2 (partial_done), jalankan ATR Trailing Stop bila multiplier > 0
+    if partial_done and atr_m5 > 0 and cfg.trailing_atr_multiplier > 0:
         trail_dist = cfg.trailing_atr_multiplier * atr_m5
         min_step = (
             max(0.05, cfg.min_trail_step_atr_ratio * atr_m5)
