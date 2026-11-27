@@ -114,34 +114,81 @@ def compute_synthetic_dxy_from_frames(
 
 
 class DXYProvider:
-    """Mengambil data DXY H4 dari MT5 (simbol broker atau sintetis ICE)."""
+    """Mengambil data DXY H4 dari MT5 (simbol broker tervalidasi atau sintetis ICE)."""
 
     def __init__(self, client: MT5Client, cfg: BotConfig = CONFIG) -> None:
         self.client = client
         self.cfg = cfg
 
+    @staticmethod
+    def is_valid_broker_dxy(
+        mt5_module: object, symbol: str, last_close: Optional[float] = None
+    ) -> bool:
+        """Pastikan simbol bukan saham/ETF kebetulan bernama USDX (mis. SGI ETF @ $24)."""
+        info = mt5_module.symbol_info(symbol)  # type: ignore[attr-defined]
+        if info is None:
+            return False
+        desc = str(getattr(info, "description", "")).lower()
+        path = str(getattr(info, "path", "")).lower()
+        non_index_markers = ("etf", "nasdaq", "nyse", "stock", "equity", "shares")
+        if any(m in desc or m in path for m in non_index_markers):
+            if "dollar index" not in desc and "usd index" not in desc:
+                return False
+
+        price_to_check = last_close
+        if price_to_check is None and hasattr(mt5_module, "symbol_info_tick"):
+            tick = mt5_module.symbol_info_tick(symbol)  # type: ignore[attr-defined]
+            if tick is not None:
+                price_to_check = float(getattr(tick, "bid", 0.0) or 0.0)
+
+        if price_to_check is not None and price_to_check > 0:
+            if not (65.0 <= price_to_check <= 140.0):
+                return False
+        return True
+
     def fetch_dxy_h4(self, count: int, offset_hours: int) -> DXYSeriesResult:
         """Ambil DataFrame H4 DXY dengan inner-join timestamp alignment."""
-        broker_dxy = self.client.resolve_symbol(self.cfg.dxy_symbol_candidates)
         tf_h4 = getattr(self.client.mt5, "TIMEFRAME_H4", 16388)
-        if broker_dxy is not None:
-            df = self.client.fetch_rates_df(broker_dxy, tf_h4, count, offset_hours)
-            if not df.empty:
+        for cand in self.cfg.dxy_symbol_candidates:
+            resolved = self.client.resolve_symbol((cand,))
+            if resolved is None:
+                continue
+            df = self.client.fetch_rates_df(resolved, tf_h4, count, offset_hours)
+            if df.empty:
+                continue
+            last_close = float(df["close"].iloc[-1])
+            if self.is_valid_broker_dxy(self.client.mt5, resolved, last_close=last_close):
                 return DXYSeriesResult(
                     df=df[["time_utc", "open", "high", "low", "close"]].copy(),
                     source_mode="BROKER_SYMBOL",
-                    used_symbols=(broker_dxy,),
+                    used_symbols=(resolved,),
                     missing_symbols=(),
                 )
 
         aliases_map = get_symbol_aliases_map(self.cfg)
         pair_frames: Dict[str, pd.DataFrame] = {}
+        resolved_pairs: Dict[str, str] = {}
         for canonical_pair, aliases in aliases_map.items():
             resolved = self.client.resolve_symbol(aliases)
             if resolved is None:
                 continue
+            resolved_pairs[canonical_pair] = resolved
             df_pair = self.client.fetch_rates_df(resolved, tf_h4, count, offset_hours)
             if not df_pair.empty:
                 pair_frames[canonical_pair] = df_pair
 
-        return compute_synthetic_dxy_from_frames(pair_frames, self.cfg)
+        res = compute_synthetic_dxy_from_frames(pair_frames, self.cfg)
+        # Jika cache lokal MT5 untuk salah satu pair ICE belum ter-sync penuh, paksa sync range
+        if len(res.df) < min(count, 40) and hasattr(self.client.mt5, "copy_rates_range"):
+            import time as _time
+
+            end_srv = int(_time.time()) + offset_hours * 3600 + 86400
+            start_srv = end_srv - max(count, 60) * 14400 * 2
+            for canonical_pair, resolved in resolved_pairs.items():
+                self.client.mt5.copy_rates_range(resolved, tf_h4, start_srv, end_srv)
+                df_pair = self.client.fetch_rates_df(resolved, tf_h4, count, offset_hours)
+                if not df_pair.empty:
+                    pair_frames[canonical_pair] = df_pair
+            res = compute_synthetic_dxy_from_frames(pair_frames, self.cfg)
+
+        return res

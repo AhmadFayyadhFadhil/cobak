@@ -17,6 +17,7 @@ import MetaTrader5 as mt5  # type: ignore
 import pandas as pd
 
 from config import CONFIG, get_symbol_aliases_map
+from core.dxy_provider import DXYProvider
 from core.mt5_client import MT5Client
 
 TIMEFRAMES = {
@@ -74,10 +75,13 @@ def main(years: int) -> None:
         inspect_symbol_history(client, xau, years, offset_hours)
 
         dxy = client.resolve_symbol(CONFIG.dxy_symbol_candidates)
-        if dxy is not None:
+        if dxy is not None and DXYProvider.is_valid_broker_dxy(client.mt5, dxy):
             inspect_symbol_history(client, dxy, years, offset_hours)
         else:
-            print("\nSimbol DXY langsung tidak ditemukan; mengecek 6 pair ICE sintetis:")
+            if dxy is not None:
+                print(f"\nSimbol {dxy} diabaikan (bukan indeks DXY valid); memakai 6 pair ICE sintetis:")
+            else:
+                print("\nSimbol DXY langsung tidak ditemukan; mengecek 6 pair ICE sintetis:")
             for canonical, aliases in get_symbol_aliases_map(CONFIG).items():
                 resolved = client.resolve_symbol(aliases)
                 if resolved is None:

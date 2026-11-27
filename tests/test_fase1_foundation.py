@@ -332,3 +332,44 @@ def test_guardrails_circuit_breaker_utc_resets_and_funnel(tmp_path: Path) -> Non
     report = format_funnel_report("2026-W48", sm.get_funnel_stats(mon))
     assert "Total bar M5 dievaluasi : 10" in report
     assert "Lolos sesi + news       : 5" in report
+
+
+def test_dxy_provider_rejects_etf_usdx_and_uses_synthetic_ice(tmp_path: Path) -> None:
+    """Jika USDX adalah saham/ETF ($24.84), DXYProvider harus fallback ke ICE sintetis."""
+    from core.dxy_provider import DXYProvider
+
+    sm = StateManager(tmp_path / "dxy.db")
+    fake = FakeMT5()
+    fake.TIMEFRAME_H4 = 16388  # type: ignore[attr-defined]
+    times = list(range(1700000000, 1700000000 + 20 * 14400, 14400))
+
+    def _sym_info(sym: str):
+        if sym == "USDX":
+            return SimpleNamespace(
+                digits=2, point=0.01, trade_tick_size=0.01, trade_tick_value=1.0,
+                volume_min=0.01, volume_max=100.0, volume_step=0.01, visible=True,
+                description="SGI Enhanced Core ETF", path=r"Nasdaq\ETF\USDX",
+            )
+        if sym in ("EURUSD", "USDJPY", "GBPUSD", "USDCAD", "USDSEK", "USDCHF"):
+            return SimpleNamespace(
+                digits=5, point=0.00001, trade_tick_size=0.00001, trade_tick_value=1.0,
+                volume_min=0.01, volume_max=100.0, volume_step=0.01, visible=True,
+                description=sym, path=f"Forex\\{sym}",
+            )
+        return None
+
+    def _copy_rates(sym: str, tf: int, pos: int, cnt: int):
+        base = {
+            "USDX": 24.84, "EURUSD": 1.08, "USDJPY": 150.0,
+            "GBPUSD": 1.26, "USDCAD": 1.38, "USDSEK": 10.5, "USDCHF": 0.88,
+        }[sym]
+        return [{"time": t, "open": base, "high": base, "low": base, "close": base} for t in times]
+
+    fake.symbol_info = _sym_info  # type: ignore[method-assign]
+    fake.symbol_info_tick = lambda sym: SimpleNamespace(bid=24.84, ask=25.0, time=times[-1])  # type: ignore[method-assign]
+    fake.copy_rates_from_pos = _copy_rates  # type: ignore[attr-defined]
+
+    client = MT5Client(BotConfig(), sm, mt5_module=fake, sleep_fn=lambda _: None)
+    res = DXYProvider(client, BotConfig()).fetch_dxy_h4(20, 0)
+    assert res.source_mode == "SYNTHETIC_ICE_6"
+    assert float(res.df["close"].iloc[-1]) > 90.0
