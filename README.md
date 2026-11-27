@@ -8,8 +8,8 @@ XAUUSD "Sniper" Quantitative Trading Engine (Python + MetaTrader 5).
 - **DXY Provider (`core/dxy_provider.py`):** Simbol broker langsung atau DXY sintetis rumus ICE (dengan fallback 5-pair dan *inner-join timestamp alignment*).
 - **SQLite State & Funnel (`core/state_manager.py`, `core/logger.py`):** Persistensi State Machine, reset Circuit Breaker berbasis UTC, dan *Signal Funnel Tracker*.
 - **Pengaman Anti-Ganas (`guardrails/anti_ganas.py`):** `isNewBar`, Single Position Guard, Max Spread USD, Cooldown 60 menit, dan Circuit Breaker 3 tingkat.
-- **Strategi 4 Layer Murni (`strategy/`):** Pivot anti *look-ahead*, filter sesi/news/korelasi DXY, BOS + SnD *fresh* (`H4 > H1`), State Machine SMC M5 (Sweep → CHoCH → FVG 50% Limit), serta `order_calc_profit()` lot sizing, Partial `1:2`, BEP + komisi, & ATR Trailing Stop.
-- **Backtest Intrabar M1 & Walk-Forward (`backtest/`):** Simulasi M1 pesimis (*SL-first* saat ambigu), spread historis per bar, `data/news_history.csv`, dan evaluator 4 Kriteria Lulus OOS.
+- **Strategi 4 Layer & MTF Matrix (`strategy/`):** Pivot anti *look-ahead*, filter sesi/news/korelasi DXY, analisa seluruh timeframe (`D1 → H4 → H1 → M15 → M5`) via `mtf_analyzer.py`, BOS + SnD *fresh* (`H4 > H1`), State Machine SMC (`M5` / `M15` / `M15_OR_M5`), serta `order_calc_profit()` lot sizing, Partial `1:2`, BEP + komisi, & ATR Trailing Stop.
+- **Backtest 10–20 Tahun & Walk-Forward (`backtest/`):** Loader CSV/Parquet eksternal (`data_loader.py` untuk Dukascopy/HistData/MT5), simulasi intrabar M1 pesimis (*SL-first*), optimasi $O(N)$, opsi parameter ATR-relatif, breakdown per 5 tahun, `data/news_history.csv`, dan evaluator 4 Kriteria Lulus OOS.
 - **Dashboard & Runner (`dashboard/app.py`, `main.py`):** Streamlit *read-only* 6 kartu (`CHIEF / SCAN / VET / SIZE / FILLS / RISK`) + `Activity Tape` dan runner single-process (`dry_run_mode=True` default).
 - **Utilitas Diagnostik (`tools/`):** `measure_spread.py` (persentil ke-90) dan `check_history_data.py` (audit data historis 3-5 tahun).
 

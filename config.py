@@ -17,6 +17,7 @@ DB_PATH = DATA_DIR / "sniper_state.db"
 
 MinLotPolicy = Literal["SKIP", "NO_PARTIAL"]
 MonthlyDDMode = Literal["START_BALANCE", "PEAK_BALANCE", "PEAK_EQUITY"]
+EntryTimeframeMode = Literal["M5", "M15", "M15_OR_M5"]
 
 
 @dataclass(frozen=True)
@@ -55,6 +56,8 @@ class BotConfig:
     atr_period: int = 14
     # Pergeseran SL minimum sebelum mengirim modify_order (dalam harga USD, misal $0.25)
     min_trail_step_usd: float = 0.25
+    # Jika > 0 (misal 0.15), step trail otomatis mengikuti ATR M5 untuk backtest lintas era 20 tahun
+    min_trail_step_atr_ratio: float = 0.0
     # Komisi round-turn per 1.00 lot dalam mata uang akun (misal $7.0 untuk akun Raw/ECN)
     commission_per_lot_account: float = 0.0
     # Akun Standard < $1,500: "NO_PARTIAL" mencegah sinyal 0.01 lot terblokir total.
@@ -73,7 +76,9 @@ class BotConfig:
     corr_negative_threshold: float = -0.5
     corr_anomaly_threshold: float = -0.3
 
-    # --- 5. Layer 2 & 3: Struktur, SMC & State Machine ---
+    # --- 5. Layer 2 & 3: Struktur, SMC, Multi-Timeframe & State Machine ---
+    entry_timeframe: EntryTimeframeMode = "M5"  # "M5" | "M15" | "M15_OR_M5"
+    require_d1_alignment: bool = False  # True: wajib searah struktur Daily (D1)
     pivot_window: int = 5  # Konfirmasi pivot baru valid pada bar i + pivot_window
     displacement_body_multiplier: float = 1.5
     displacement_avg_period: int = 10
@@ -86,6 +91,8 @@ class BotConfig:
     # Gunakan batas spread dalam jarak harga USD agar kebal perbedaan broker 2-digit vs 3-digit.
     # Kalibrasi nilai ini menggunakan tools/measure_spread.py (persentil ke-90 sesi 07-16 UTC).
     max_spread_usd: float = 0.35
+    # Jika > 0 (misal 0.25), batas spread backtest 20 tahun diskalakan terhadap ATR(14) M5
+    max_spread_atr_ratio: float = 0.0
     cooldown_minutes: int = 60
     daily_max_sl_count: int = 2
     daily_max_loss_pct: float = 3.0

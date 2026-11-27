@@ -172,13 +172,18 @@ def evaluate_active_position_actions(
     # Fase 2: Setelah melewati 1:2 (partial_done), jalankan ATR Trailing Stop dengan hysteresis step
     if partial_done and atr_m5 > 0:
         trail_dist = cfg.trailing_atr_multiplier * atr_m5
+        min_step = (
+            max(0.05, cfg.min_trail_step_atr_ratio * atr_m5)
+            if cfg.min_trail_step_atr_ratio > 0
+            else cfg.min_trail_step_usd
+        )
         if direction == "BUY":
             candidate_sl = exit_price - trail_dist
-            if candidate_sl > current_sl and (candidate_sl - current_sl) >= cfg.min_trail_step_usd:
+            if candidate_sl > current_sl and (candidate_sl - current_sl) >= min_step:
                 return PositionAction(None, candidate_sl, "ATR_TRAIL_UPDATE")
         else:
             candidate_sl = exit_price + trail_dist
-            if candidate_sl < current_sl and (current_sl - candidate_sl) >= cfg.min_trail_step_usd:
+            if candidate_sl < current_sl and (current_sl - candidate_sl) >= min_step:
                 return PositionAction(None, candidate_sl, "ATR_TRAIL_UPDATE")
 
     return PositionAction(None, None, "HOLD")

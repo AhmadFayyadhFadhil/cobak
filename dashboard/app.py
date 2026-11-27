@@ -1,5 +1,5 @@
-"""Dashboard Review Read-Only (Streamlit) — 6 Kartu Pipeline ala Terminal Bot:
-CHIEF | SCAN | VET | SIZE | FILLS | RISK + Activity Tape + Signal Funnel.
+"""Dashboard Review Read-Only (Streamlit) — 6 Kartu Pipeline + Multi-Timeframe Matrix:
+CHIEF | SCAN | VET | SIZE | FILLS | RISK + MTF Matrix (D1..M5) + Activity Tape + Signal Funnel.
 
 PENTING: Modul ini dilarang mengimpor atau memanggil `MetaTrader5` secara langsung
 (thread-safety). Seluruh data dibaca read-only dari SQLite & CSV hasil backtest.
@@ -7,6 +7,7 @@ PENTING: Modul ini dilarang mengimpor atau memanggil `MetaTrader5` secara langsu
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -37,6 +38,12 @@ def build_six_cards_snapshot(
     sm = StateManager(db_path)
     st = sm.get_strategy_state()
     funnel = sm.get_funnel_stats(now_utc)
+    mtf = load_mtf_matrix(db_path)
+    mtf_txt = (
+        f" | MTF: {mtf['aligned_count']}/5 ({mtf['dominant_bias']})"
+        if mtf is not None
+        else ""
+    )
 
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
@@ -48,11 +55,11 @@ def build_six_cards_snapshot(
     return {
         "CHIEF": {
             "status": "HALTED" if monthly_halted else st.state,
-            "detail": f"Mode: {'DRY-RUN' if CONFIG.dry_run_mode else 'LIVE/DEMO'}",
+            "detail": f"Mode: {'DRY-RUN' if CONFIG.dry_run_mode else 'LIVE/DEMO'} | TF: {CONFIG.entry_timeframe}",
         },
         "SCAN": {
             "status": f"{funnel['passed_dxy_corr']} / {funnel['total_m5_bars']}",
-            "detail": f"Zona Armed minggu ini: {funnel['zones_armed']}",
+            "detail": f"Zona Armed: {funnel['zones_armed']}{mtf_txt}",
         },
         "VET": {
             "status": f"{funnel['sweeps_detected']} Sweep | {funnel['choch_confirmed']} CHoCH",
@@ -71,6 +78,19 @@ def build_six_cards_snapshot(
             "detail": f"Daily SL: {daily_sl}/{CONFIG.daily_max_sl_count} | DD Mode: {CONFIG.monthly_dd_mode}",
         },
     }
+
+
+def load_mtf_matrix(db_path: Path = DB_PATH) -> Optional[Dict[str, Any]]:
+    """Baca snapshot Multi-Timeframe Matrix (D1..M5) terakhir dari SQLite."""
+    if not Path(db_path).exists():
+        return None
+    raw = StateManager(db_path).get_meta("mtf_matrix_json")
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except Exception:
+        return None
 
 
 def load_activity_tape(db_path: Path = DB_PATH, limit: int = 50) -> pd.DataFrame:
@@ -113,6 +133,15 @@ def render_streamlit_dashboard() -> None:
         with col:
             st.metric(label=name, value=data["status"])
             st.caption(data["detail"])
+
+    mtf = load_mtf_matrix(DB_PATH)
+    if mtf is not None:
+        st.divider()
+        st.subheader(
+            f"Multi-Timeframe Matrix ({mtf['aligned_count']}/5 Aligned | Bias: {mtf['dominant_bias']} | Entry TF: {mtf['recommended_entry_tf']})"
+        )
+        tf_rows = list(mtf.get("snapshots", {}).values())
+        st.dataframe(pd.DataFrame(tf_rows), use_container_width=True, hide_index=True)
 
     st.divider()
     left, right = st.columns([1.2, 1.0])

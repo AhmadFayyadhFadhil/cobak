@@ -3,7 +3,7 @@
 Menjalankan dua ritme berbeda:
 1. Loop cepat (`poll_interval_seconds`) untuk Position Manager saat `IN_POSITION`
    (Partial TP 1:2, BEP + spread/komisi, ATR Trailing Stop dengan step hysteresis).
-2. Evaluasi sinyal strategi 4 Layer hanya saat candle M5 baru close (`isNewBar`).
+2. Evaluasi sinyal strategi 4 Layer + MTF Matrix hanya saat candle M5 baru close (`isNewBar`).
 """
 
 from __future__ import annotations
@@ -19,10 +19,11 @@ from core.mt5_client import MT5Client, make_unique_comment
 from core.state_manager import StateManager, StrategyState
 from guardrails.anti_ganas import AntiGanasGuard
 from strategy.indicators import compute_atr
-from strategy.layer1_macro import evaluate_layer1, is_within_session_utc
+from strategy.layer1_macro import evaluate_layer1, infer_h4_structure_bias, is_within_session_utc
 from strategy.layer2_structure import detect_bos_and_fresh_zones, select_priority_touched_zone
 from strategy.layer3_smc_m5 import advance_smc_state_machine
 from strategy.layer4_risk_exit import calculate_position_lot, evaluate_active_position_actions
+from strategy.mtf_analyzer import build_mtf_matrix
 
 
 class SniperEngineRunner:
@@ -52,10 +53,11 @@ class SniperEngineRunner:
             return False
         spec = self.client.get_symbol_spec(self._symbol)
         self.logger.info(
-            "MT5 terhubung: symbol=%s digits=%d point=%s dry_run=%s",
+            "MT5 terhubung: symbol=%s digits=%d point=%s entry_tf=%s dry_run=%s",
             spec.name,
             spec.digits,
             spec.point,
+            self.cfg.entry_timeframe,
             self.cfg.dry_run_mode,
         )
         return True
@@ -74,7 +76,6 @@ class SniperEngineRunner:
         st = self.state.get_strategy_state()
         if not open_positions:
             if st.state == "IN_POSITION":
-                # Posisi baru saja tutup -> masuk cooldown 60 menit
                 cd_until = now_utc + timedelta(minutes=self.cfg.cooldown_minutes)
                 self.state.save_strategy_state(
                     StrategyState(state="COOLDOWN", cooldown_until_utc=cd_until.isoformat())
@@ -137,12 +138,10 @@ class SniperEngineRunner:
         open_positions = self.client.get_open_positions(self.cfg.magic_number)
         pending_orders = self.client.get_pending_orders(self.cfg.magic_number)
 
-        # 1. Position Manager selalu berjalan cepat meskipun di luar sesi 07-16 UTC
         self._manage_active_position(self._symbol, open_positions, offset_hours, now_utc)
         if open_positions:
             return
 
-        # 2. Ambil candle M5 terbaru dan buang bar berjalan agar hanya mengevaluasi candle close
         tf_m5 = getattr(self.client.mt5, "TIMEFRAME_M5", 5)
         m5_raw = self.client.fetch_rates_df(self._symbol, tf_m5, 160, offset_hours)
         if len(m5_raw) < 20:
@@ -159,28 +158,58 @@ class SniperEngineRunner:
         balance, equity = self.client.get_account_snapshot()
         spread_usd = self.client.get_spread_usd(self._symbol)
 
-        # 3. Cek Layer 1 terlebih dahulu (Sesi + News fail-closed + Korelasi DXY)
+        tf_d1 = getattr(self.client.mt5, "TIMEFRAME_D1", 16408)
         tf_h4 = getattr(self.client.mt5, "TIMEFRAME_H4", 16388)
         tf_h1 = getattr(self.client.mt5, "TIMEFRAME_H1", 16385)
+        tf_m15 = getattr(self.client.mt5, "TIMEFRAME_M15", 15)
+
+        d1_raw = self.client.fetch_rates_df(self._symbol, tf_d1, 90, offset_hours)
+        xau_d1 = d1_raw.iloc[:-1] if len(d1_raw) > 1 else d1_raw
         xau_h4 = self.client.fetch_rates_df(self._symbol, tf_h4, 160, offset_hours).iloc[:-1]
         xau_h1 = self.client.fetch_rates_df(self._symbol, tf_h1, 200, offset_hours).iloc[:-1]
+        m15_raw = self.client.fetch_rates_df(self._symbol, tf_m15, 160, offset_hours)
+        xau_m15 = m15_raw.iloc[:-1] if len(m15_raw) > 1 else m15_raw
+
         dxy_res = self.dxy_provider.fetch_dxy_h4(160, offset_hours)
         dxy_h4 = dxy_res.df.iloc[:-1] if len(dxy_res.df) > 1 else dxy_res.df
 
         in_session = is_within_session_utc(now_utc, self.cfg.session_start_utc, self.cfg.session_end_utc)
         l1 = evaluate_layer1(now_utc, xau_h4, dxy_h4, self.cfg)
+
+        zones_h4 = (
+            detect_bos_and_fresh_zones(xau_h4, "H4", l1.bias, self.cfg.pivot_window)
+            if l1.bias is not None
+            else []
+        )
+        zones_h1 = (
+            detect_bos_and_fresh_zones(xau_h1, "H1", l1.bias, self.cfg.pivot_window)
+            if l1.bias is not None
+            else []
+        )
+        mtf_report = build_mtf_matrix(
+            xau_d1, xau_h4, xau_h1, xau_m15, m5_closed, l1.bias, zones_h4, zones_h1, self.cfg
+        )
+        self.state.set_meta("mtf_matrix_json", mtf_report.to_json())
+
         if not l1.passed or l1.bias is None:
             log_skip(self.logger, now_utc.isoformat(), l1.reason, "LAYER1")
             self.state.record_skip(now_utc, "LAYER1", l1.reason)
-            # Jalankan state machine jika sedang di luar sesi untuk membatalkan PENDING/ZONE_ARMED
             if not in_session:
                 act_clean = advance_smc_state_machine(self.state, m5_closed, None, now_utc, False, self.cfg)
                 if act_clean.action == "CANCEL_PENDING" and pending_orders and not self.cfg.dry_run_mode:
                     self.client.cancel_pending_order(int(pending_orders[0].ticket))
             return
+
+        if self.cfg.require_d1_alignment:
+            d1_bias = infer_h4_structure_bias(xau_d1, pivot_window=self.cfg.pivot_window)
+            if d1_bias != l1.bias:
+                reason_d1 = f"Skipped: D1 bias ({d1_bias}) tidak searah Layer 1 ({l1.bias})."
+                log_skip(self.logger, now_utc.isoformat(), reason_d1, "D1_ALIGNMENT")
+                self.state.record_skip(now_utc, "D1_ALIGNMENT", reason_d1)
+                return
+
         self.state.increment_funnel(now_utc, "passed_session_news", 1)
 
-        # 4. Cek 5 Gerbang Anti-Ganas (Spread, Cooldown, Single Position, Circuit Breaker)
         pre = self.guard.check_pre_entry_gates(
             now_utc=now_utc,
             balance=balance,
@@ -196,9 +225,6 @@ class SniperEngineRunner:
         self.state.increment_funnel(now_utc, "passed_spread", 1)
         self.state.increment_funnel(now_utc, "passed_dxy_corr", 1)
 
-        # 5. Layer 2: Deteksi zona SnD fresh H4/H1 dengan prioritas H4 > H1
-        zones_h4 = detect_bos_and_fresh_zones(xau_h4, "H4", l1.bias, self.cfg.pivot_window)
-        zones_h1 = detect_bos_and_fresh_zones(xau_h1, "H1", l1.bias, self.cfg.pivot_window)
         last_bar = m5_closed.iloc[-1]
         active_zone = select_priority_touched_zone(
             zones_h4 + zones_h1,
@@ -208,10 +234,17 @@ class SniperEngineRunner:
             bar_high=float(last_bar["high"]),
         )
 
-        # 6. Layer 3: Advance State Machine M5
-        act = advance_smc_state_machine(
-            self.state, m5_closed, active_zone=active_zone, now_utc=now_utc, in_session=in_session, cfg=self.cfg
+        cur_st = self.state.get_strategy_state()
+        zone_tf = cur_st.zone_timeframe or (active_zone.timeframe if active_zone else "H1")
+        use_m15 = (
+            self.cfg.entry_timeframe == "M15"
+            or (self.cfg.entry_timeframe == "M15_OR_M5" and zone_tf == "H4")
         )
+        entry_df = xau_m15 if (use_m15 and not xau_m15.empty) else m5_closed
+        act = advance_smc_state_machine(
+            self.state, entry_df, active_zone=active_zone, now_utc=now_utc, in_session=in_session, cfg=self.cfg
+        )
+
         if act.action == "CANCEL_PENDING" and pending_orders and not self.cfg.dry_run_mode:
             self.client.cancel_pending_order(int(pending_orders[0].ticket))
             return
@@ -219,7 +252,6 @@ class SniperEngineRunner:
         if act.action != "PLACE_LIMIT" or act.direction is None or act.limit_price is None or act.sl_price is None or act.tp_price is None:
             return
 
-        # 7. Layer 4: Lot Sizing + Idempotent Limit Order (atau Dry-Run Log)
         spec = self.client.get_symbol_spec(self._symbol)
         lot_res = calculate_position_lot(
             client=self.client,

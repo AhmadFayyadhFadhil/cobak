@@ -1,13 +1,14 @@
 """Backtester event-driven berbagi fungsi murni strategy/ dengan simulasi intrabar M1
-(asumsi pesimis SL kena duluan jika ambigu), spread historis per bar, dan news CSV.
+(asumsi pesimis SL kena duluan jika ambigu), spread historis per bar, optimasi O(N)
+untuk rentang 10-20 tahun, dukungan MTF (D1/H4/H1/M15/M5), dan breakdown per 5 tahun.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, List, Literal, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -58,7 +59,7 @@ class TradeOutcome:
 
 @dataclass
 class BacktestResult:
-    """Ringkasan hasil backtest termasuk Realized R dan funnel diagnostik."""
+    """Ringkasan hasil backtest termasuk Realized R, breakdown 5-tahunan, dan funnel."""
 
     trades: List[TradeOutcome]
     initial_balance: float
@@ -69,10 +70,12 @@ class BacktestResult:
     expectancy_r: float
     max_drawdown_pct: float
     funnel: Dict[str, int] = field(default_factory=dict)
+    regime_breakdown: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    news_coverage_note: str = ""
 
 
 class _InMemoryBacktestState:
-    """Implementasi in-memory kompatibel StateManager agar loop backtest sangat cepat."""
+    """Implementasi in-memory kompatibel StateManager agar loop 20 tahun tetap cepat."""
 
     def __init__(self) -> None:
         self._strategy_state = StrategyState(state="IDLE")
@@ -210,6 +213,54 @@ def load_news_history_csv(path: Path) -> pd.DataFrame:
     return df
 
 
+def _evaluate_news_coverage(
+    data_start: datetime, data_end: datetime, news_df: pd.DataFrame
+) -> str:
+    """Laporkan secara jujur cakupan tahun kalender berita historis terhadap rentang backtest."""
+    if news_df.empty:
+        return (
+            f"PERINGATAN: news_history.csv kosong untuk rentang backtest "
+            f"{data_start:%Y-%m-%d} s/d {data_end:%Y-%m-%d}; hasil belum terfilter berita."
+        )
+    min_n = pd.Timestamp(news_df["time_utc"].min()).to_pydatetime().astimezone(timezone.utc)
+    max_n = pd.Timestamp(news_df["time_utc"].max()).to_pydatetime().astimezone(timezone.utc)
+    if min_n.year > data_start.year or max_n.year < data_end.year:
+        return (
+            f"PERINGATAN: news_history.csv hanya mencakup {min_n:%Y-%m-%d} s/d {max_n:%Y-%m-%d}, "
+            f"sedangkan backtest berjalan {data_start:%Y-%m-%d} s/d {data_end:%Y-%m-%d}."
+        )
+    return f"OK: Kalender berita mencakup {min_n:%Y-%m-%d} s/d {max_n:%Y-%m-%d}."
+
+
+def _compute_5y_regime_breakdown(trades: List[TradeOutcome]) -> Dict[str, Dict[str, Any]]:
+    """Kelompokkan metrik performa per blok 5 tahun untuk melihat ketahanan lintas rezim."""
+    buckets: Dict[str, List[TradeOutcome]] = {}
+    for t in trades:
+        ref_dt = t.entry_time_utc or t.exit_time_utc
+        if ref_dt is None:
+            continue
+        start_y = (ref_dt.year // 5) * 5
+        if ref_dt.year >= 2006:
+            # Blok alami 2006-2010, 2011-2015, 2016-2020, 2021-2025, 2026-2030
+            start_y = 2006 + ((ref_dt.year - 2006) // 5) * 5
+        label = f"{start_y}-{start_y + 4}"
+        buckets.setdefault(label, []).append(t)
+
+    out: Dict[str, Dict[str, Any]] = {}
+    for label, grp in sorted(buckets.items()):
+        r_vals = [x.realized_r for x in grp]
+        wins = [r for r in r_vals if r > 0]
+        losses = [abs(r) for r in r_vals if r < 0]
+        pf = (sum(wins) / sum(losses)) if losses else (99.0 if wins else 0.0)
+        out[label] = {
+            "trades": len(grp),
+            "win_rate": (len(wins) / len(grp)) * 100.0,
+            "profit_factor": pf,
+            "expectancy_r": float(np.mean(r_vals)),
+        }
+    return out
+
+
 def simulate_trade_intrabar_m1(
     direction: Literal["BUY", "SELL"],
     limit_price: float,
@@ -256,7 +307,6 @@ def simulate_trade_intrabar_m1(
             if t_utc >= expiry_utc or not is_within_session_utc(t_utc, cfg.session_start_utc, session_end_hhmm):
                 return TradeOutcome(False, direction, None, t_utc, limit_price, sl_price, tp_final_price, False, "CANCELLED", 0.0)
 
-            # Cek apakah limit terjemput di bar M1 ini lebih dulu sebelum membatalkan
             if direction == "BUY":
                 if ask_low <= limit_price <= ask_high:
                     filled = True
@@ -318,7 +368,7 @@ def simulate_trade_intrabar_m1(
 
 
 class BacktestEngine:
-    """Mesin backtest deterministik memakai fungsi strategy/ & guardrails/ yang sama dengan live."""
+    """Mesin backtest O(N) untuk rentang 1-20 tahun memakai fungsi produksi strategy/ & guardrails/."""
 
     def __init__(self, cfg: BotConfig = CONFIG, point: float = 0.01) -> None:
         self.cfg = cfg
@@ -333,8 +383,10 @@ class BacktestEngine:
         m1_df: Optional[pd.DataFrame] = None,
         news_history_df: Optional[pd.DataFrame] = None,
         initial_balance: float = 2000.0,
+        d1_df: Optional[pd.DataFrame] = None,
+        m15_df: Optional[pd.DataFrame] = None,
     ) -> BacktestResult:
-        """Jalankan backtest berurutan tanpa look-ahead bias."""
+        """Jalankan backtest berurutan tanpa look-ahead bias (kompleksitas O(N))."""
         if m5_df.empty:
             return BacktestResult([], initial_balance, initial_balance, 0, 0.0, 0.0, 0.0, 0.0)
 
@@ -343,26 +395,31 @@ class BacktestEngine:
         h4 = h4_df.sort_values("time_utc").reset_index(drop=True)
         dxy = dxy_h4.sort_values("time_utc").reset_index(drop=True)
         m1 = (m1_df if m1_df is not None and not m1_df.empty else m5).sort_values("time_utc").reset_index(drop=True)
+        d1 = d1_df.sort_values("time_utc").reset_index(drop=True) if d1_df is not None and not d1_df.empty else None
+        m15 = m15_df.sort_values("time_utc").reset_index(drop=True) if m15_df is not None and not m15_df.empty else None
 
         m5_ns = pd.DatetimeIndex(m5["time_utc"]).as_unit("ns").asi8
         h1_ns = pd.DatetimeIndex(h1["time_utc"]).as_unit("ns").asi8
         h4_ns = pd.DatetimeIndex(h4["time_utc"]).as_unit("ns").asi8
         dxy_ns = pd.DatetimeIndex(dxy["time_utc"]).as_unit("ns").asi8
         m1_ns = pd.DatetimeIndex(m1["time_utc"]).as_unit("ns").asi8
+        d1_ns = pd.DatetimeIndex(d1["time_utc"]).as_unit("ns").asi8 if d1 is not None else None
+        m15_ns = pd.DatetimeIndex(m15["time_utc"]).as_unit("ns").asi8 if m15 is not None else None
 
         m5_times = pd.DatetimeIndex(m5["time_utc"]).tz_convert("UTC").to_pydatetime()
         m5_lows = m5["low"].to_numpy(dtype=float)
         m5_highs = m5["high"].to_numpy(dtype=float)
         m5_closes = m5["close"].to_numpy(dtype=float)
+        m5_atr = compute_atr(m5, self.cfg.atr_period).to_numpy(dtype=float)
         m5_spreads = (
             m5["spread"].fillna(25.0).to_numpy(dtype=float)
             if "spread" in m5.columns
             else np.full(len(m5), 25.0)
         )
         news_df = news_history_df if news_history_df is not None else pd.DataFrame()
+        news_note = _evaluate_news_coverage(m5_times[0], m5_times[-1], news_df)
 
         sm = _InMemoryBacktestState()
-        guard = AntiGanasGuard(sm, self.cfg)  # type: ignore[arg-type]
         balance = initial_balance
         peak_balance = initial_balance
         max_dd_pct = 0.0
@@ -370,9 +427,9 @@ class BacktestEngine:
         busy_until_utc: Optional[datetime] = None
         last_closed_utc: Optional[datetime] = None
 
-        # Cache indikator H4 & H1 agar tidak dihitung ulang setiap bar M5
         cached_h4_key: Optional[Tuple[int, int]] = None
         cached_macro: Tuple[Optional[float], BiasType, BiasType] = (None, "NEUTRAL", "NEUTRAL")
+        cached_d1: Tuple[int, BiasType] = (-1, "NEUTRAL")
         cached_zones_h4: Tuple[int, str, List[SupplyDemandZone]] = (-1, "", [])
         cached_zones_h1: Tuple[int, str, List[SupplyDemandZone]] = (-1, "", [])
 
@@ -397,9 +454,14 @@ class BacktestEngine:
             dxy_idx = int(np.searchsorted(dxy_ns, cur_ns, side="right"))
             h1_idx = int(np.searchsorted(h1_ns, cur_ns, side="right"))
 
+            # Rolling window H4/H1 menjaga kompleksitas O(N) pada data 20 tahun
+            h4_start = max(0, h4_idx - 250)
+            dxy_start = max(0, dxy_idx - 250)
+            h1_start = max(0, h1_idx - 400)
+
             if cached_h4_key != (h4_idx, dxy_idx):
-                xau_slice = h4.iloc[:h4_idx]
-                dxy_slice = dxy.iloc[:dxy_idx]
+                xau_slice = h4.iloc[h4_start:h4_idx]
+                dxy_slice = dxy.iloc[dxy_start:dxy_idx]
                 corr = compute_rolling_correlation(xau_slice, dxy_slice, window=self.cfg.corr_window_h4)
                 xau_tr = infer_h4_structure_bias(xau_slice, pivot_window=self.cfg.pivot_window)
                 dxy_tr = infer_h4_structure_bias(dxy_slice, pivot_window=self.cfg.pivot_window)
@@ -410,7 +472,27 @@ class BacktestEngine:
             l1 = _resolve_macro_bias(corr, dxy_trend, xau_trend, self.cfg)
             if not l1.passed or l1.bias is None:
                 continue
+
+            # Opsional filter Daily (D1) alignment bila diaktifkan di config
+            if self.cfg.require_d1_alignment and d1 is not None and d1_ns is not None:
+                d1_idx = int(np.searchsorted(d1_ns, cur_ns, side="right"))
+                if cached_d1[0] != d1_idx:
+                    d1_bias = infer_h4_structure_bias(
+                        d1.iloc[max(0, d1_idx - 120) : d1_idx], pivot_window=self.cfg.pivot_window
+                    )
+                    cached_d1 = (d1_idx, d1_bias)
+                if cached_d1[1] != l1.bias:
+                    continue
+
             sm.increment_funnel(now_utc, "passed_session_news", 1)
+
+            atr_val = float(m5_atr[i])
+            eff_cfg = (
+                replace(self.cfg, max_spread_usd=max(0.05, self.cfg.max_spread_atr_ratio * atr_val))
+                if self.cfg.max_spread_atr_ratio > 0 and atr_val > 0
+                else self.cfg
+            )
+            guard = AntiGanasGuard(sm, eff_cfg)  # type: ignore[arg-type]
 
             spread_usd = float(m5_spreads[i]) * self.point
             dec = guard.check_pre_entry_gates(
@@ -431,13 +513,13 @@ class BacktestEngine:
                 cached_zones_h4 = (
                     h4_idx,
                     l1.bias,
-                    detect_bos_and_fresh_zones(h4.iloc[:h4_idx], "H4", l1.bias, self.cfg.pivot_window),
+                    detect_bos_and_fresh_zones(h4.iloc[h4_start:h4_idx], "H4", l1.bias, self.cfg.pivot_window),
                 )
             if cached_zones_h1[0] != h1_idx or cached_zones_h1[1] != l1.bias:
                 cached_zones_h1 = (
                     h1_idx,
                     l1.bias,
-                    detect_bos_and_fresh_zones(h1.iloc[:h1_idx], "H1", l1.bias, self.cfg.pivot_window),
+                    detect_bos_and_fresh_zones(h1.iloc[h1_start:h1_idx], "H1", l1.bias, self.cfg.pivot_window),
                 )
 
             active_zone = select_priority_touched_zone(
@@ -448,13 +530,24 @@ class BacktestEngine:
                 bar_high=float(m5_highs[i]),
             )
 
-            m5_slice = m5.iloc[max(0, i - 120) : i + 1]
+            # Pilih timeframe pemicu entry konsisten (M15_OR_M5: zona H4 -> M15, zona H1 -> M5)
+            cur_st = sm.get_strategy_state()
+            zone_tf = cur_st.zone_timeframe or (active_zone.timeframe if active_zone else "H1")
+            use_m15 = (
+                self.cfg.entry_timeframe == "M15"
+                or (self.cfg.entry_timeframe == "M15_OR_M5" and zone_tf == "H4")
+            )
+            if use_m15 and m15 is not None and m15_ns is not None:
+                m15_idx = int(np.searchsorted(m15_ns, cur_ns, side="right"))
+                entry_slice = m15.iloc[max(0, m15_idx - 120) : m15_idx]
+            else:
+                entry_slice = m5.iloc[max(0, i - 120) : i + 1]
+
             act = advance_smc_state_machine(
-                sm, m5_slice, active_zone=active_zone, now_utc=now_utc, in_session=True, cfg=self.cfg  # type: ignore[arg-type]
+                sm, entry_slice, active_zone=active_zone, now_utc=now_utc, in_session=True, cfg=eff_cfg  # type: ignore[arg-type]
             )
 
             if act.action == "PLACE_LIMIT" and act.direction and act.limit_price and act.sl_price and act.tp_price and act.tp_1_2_price:
-                atr_val = float(compute_atr(m5_slice, self.cfg.atr_period).iloc[-1])
                 risk_dist = abs(act.limit_price - act.sl_price)
                 risk_amt = balance * (dec.effective_risk_pct / 100.0)
                 raw_lot = (risk_amt / (risk_dist * 100.0)) if risk_dist > 0 else 0.0
@@ -466,7 +559,6 @@ class BacktestEngine:
                     continue
 
                 m1_start = int(np.searchsorted(m1_ns, cur_ns, side="right"))
-                # Batasi horizon M1 maks 48 jam agar slicing tetap ramping
                 horizon_ns = cur_ns + int(48 * 3600 * 1e9)
                 m1_end = int(np.searchsorted(m1_ns, horizon_ns, side="right"))
                 outcome = simulate_trade_intrabar_m1(
@@ -480,7 +572,7 @@ class BacktestEngine:
                     expiry_utc=now_utc + timedelta(hours=self.cfg.pending_order_expiry_hours),
                     session_end_hhmm=self.cfg.session_end_utc,
                     point=self.point,
-                    cfg=self.cfg,
+                    cfg=eff_cfg,
                     allow_partial=allow_partial,
                 )
                 if outcome.filled:
@@ -501,8 +593,11 @@ class BacktestEngine:
                 sm.save_strategy_state(StrategyState(state="IDLE"))
 
         funnel = sm.get_funnel_stats(m5_times[-1])
+        breakdown = _compute_5y_regime_breakdown(trades)
         if not trades:
-            return BacktestResult([], initial_balance, balance, 0, 0.0, 0.0, 0.0, max_dd_pct, funnel)
+            return BacktestResult(
+                [], initial_balance, balance, 0, 0.0, 0.0, 0.0, max_dd_pct, funnel, breakdown, news_note
+            )
 
         r_vals = [t.realized_r for t in trades]
         wins = [r for r in r_vals if r > 0]
@@ -523,6 +618,8 @@ class BacktestEngine:
             expectancy_r=expectancy_r,
             max_drawdown_pct=max_dd_pct,
             funnel=funnel,
+            regime_breakdown=breakdown,
+            news_coverage_note=news_note,
         )
 
 
