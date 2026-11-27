@@ -17,7 +17,7 @@ DB_PATH = DATA_DIR / "sniper_state.db"
 
 MinLotPolicy = Literal["SKIP", "NO_PARTIAL"]
 MonthlyDDMode = Literal["START_BALANCE", "PEAK_BALANCE", "PEAK_EQUITY"]
-EntryTimeframeMode = Literal["M5", "M15", "M15_OR_M5"]
+EntryTimeframeMode = Literal["M5", "M15", "M15_OR_M5", "H1"]
 
 
 @dataclass(frozen=True)
@@ -77,15 +77,16 @@ class BotConfig:
     corr_anomaly_threshold: float = -0.3
 
     # --- 5. Layer 2 & 3: Struktur, SMC, Multi-Timeframe & State Machine ---
-    entry_timeframe: EntryTimeframeMode = "M5"  # "M5" | "M15" | "M15_OR_M5"
+    entry_timeframe: EntryTimeframeMode = "H1"  # "H1" | "M5" | "M15" | "M15_OR_M5"
     require_d1_alignment: bool = False  # True: wajib searah struktur Daily (D1)
+    allow_xau_only_when_dxy_unavailable: bool = True  # Fallback ke struktur XAUUSD H4 bila DXY historis tidak ada
     pivot_window: int = 5  # Konfirmasi pivot baru valid pada bar i + pivot_window
     displacement_body_multiplier: float = 1.5
     displacement_avg_period: int = 10
     require_tick_volume_filter: bool = False  # Opsional karena tick volume antar broker bervariasi
-    zone_armed_timeout_hours: float = 5.0  # 4-6 jam
-    max_fvg_wait_candles_m5: int = 5  # 3-6 candle M5 setelah CHoCH
-    pending_order_expiry_hours: float = 3.0  # 2-4 jam
+    zone_armed_timeout_hours: float = 36.0  # 36 jam (~36 bar H1) untuk H1 mode
+    max_fvg_wait_candles_m5: int = 5  # 3-6 candle setelah CHoCH
+    pending_order_expiry_hours: float = 12.0  # Maksimal batas expiry pending order
 
     # --- 6. Guardrails Anti-Ganas & Eksekusi ---
     # Gunakan batas spread dalam jarak harga USD agar kebal perbedaan broker 2-digit vs 3-digit.

@@ -15,7 +15,11 @@ from typing import Any, Dict, Optional
 
 import pandas as pd
 
-from backtest.data_loader import build_20y_dataset
+from backtest.data_loader import (
+    build_20y_dataset,
+    load_ohlcv_file,
+    resample_h1_to_higher_timeframes,
+)
 from backtest.engine import BacktestEngine, BacktestResult, load_news_history_csv
 from backtest.walk_forward import evaluate_oos_pass_criteria
 from config import CONFIG, DATA_DIR, BotConfig
@@ -107,6 +111,7 @@ def main(
     xau_csv: Optional[Path],
     dxy_csv: Optional[Path],
     atr_relative: bool,
+    utc_offset: int = 2,
     save_json: bool = True,
 ) -> BacktestResult:
     cfg = CONFIG
@@ -115,6 +120,20 @@ def main(
 
     if source == "mt5":
         dataset, point, source_label = _fetch_mt5_dataset(cfg)
+    elif source == "h1_csv" or (source == "csv" and cfg.entry_timeframe == "H1" and dxy_csv is None):
+        if xau_csv is None:
+            raise ValueError("Wajib menyertakan --xau <path file H1 CSV/ZIP>.")
+        h1_raw = load_ohlcv_file(xau_csv, default_spread_points=25.0, source_utc_offset_hours=utc_offset)
+        dataset = resample_h1_to_higher_timeframes(h1_raw)
+        dataset["M5"] = pd.DataFrame(columns=h1_raw.columns)
+        dataset["M1"] = pd.DataFrame(columns=h1_raw.columns)
+        if dxy_csv is not None:
+            dxy_raw = load_ohlcv_file(dxy_csv, source_utc_offset_hours=utc_offset)
+            dataset["DXY_H4"] = resample_h1_to_higher_timeframes(dxy_raw)["H4"]
+        else:
+            dataset["DXY_H4"] = pd.DataFrame(columns=["time_utc", "open", "high", "low", "close"])
+        point = 0.01
+        source_label = f"H1-CSV ({xau_csv.name})"
     else:
         if xau_csv is None or dxy_csv is None:
             raise ValueError("Untuk --source csv wajib menyertakan --xau dan --dxy.")
@@ -122,20 +141,20 @@ def main(
         point = 0.01
         source_label = f"CSV ({xau_csv.name})"
 
-    m5 = dataset["M5"]
-    if m5.empty:
-        raise RuntimeError("Data M5 kosong, backtest tidak dapat dijalankan.")
+    primary_df = dataset["H1"] if cfg.entry_timeframe == "H1" else dataset["M5"]
+    if primary_df.empty:
+        raise RuntimeError("Data utama (H1/M5) kosong, backtest tidak dapat dijalankan.")
 
-    start_dt = pd.Timestamp(m5["time_utc"].iloc[0]).strftime("%Y-%m-%d")
-    end_dt = pd.Timestamp(m5["time_utc"].iloc[-1]).strftime("%Y-%m-%d")
+    start_dt = pd.Timestamp(primary_df["time_utc"].iloc[0]).strftime("%Y-%m-%d")
+    end_dt = pd.Timestamp(primary_df["time_utc"].iloc[-1]).strftime("%Y-%m-%d")
     date_range = f"{start_dt} s/d {end_dt}"
 
     news_df = load_news_history_csv(cfg.news_history_csv)
     result = BacktestEngine(cfg, point=point).run(
-        m5_df=m5,
+        m5_df=dataset.get("M5", pd.DataFrame()),
         h1_df=dataset["H1"],
         h4_df=dataset["H4"],
-        dxy_h4=dataset["DXY_H4"],
+        dxy_h4=dataset.get("DXY_H4"),
         m1_df=dataset.get("M1"),
         news_history_df=news_df,
         initial_balance=balance,
@@ -150,8 +169,8 @@ def main(
         result.profit_factor, result.expectancy_r, result.max_drawdown_pct, result.total_trades
     )
 
-    print(f"\n=== HASIL BACKTEST XAUUSD SNIPER ({source_label}) ===")
-    print(f"Periode Data   : {date_range} ({len(m5):,} bar M5)")
+    print(f"\n=== HASIL BACKTEST XAUUSD SNIPER ({source_label} | Entry={cfg.entry_timeframe}) ===")
+    print(f"Periode Data   : {date_range} ({len(primary_df):,} bar {cfg.entry_timeframe})")
     print(f"Saldo Awal     : ${result.initial_balance:,.2f}")
     print(f"Saldo Akhir    : ${result.final_balance:,.2f}")
     print(f"Total Trade    : {result.total_trades}")
@@ -174,10 +193,11 @@ def main(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Jalankan backtest XAUUSD Sniper dari MT5 atau CSV")
-    parser.add_argument("--source", choices=("mt5", "csv"), default="mt5")
+    parser.add_argument("--source", choices=("mt5", "csv", "h1_csv"), default="mt5")
     parser.add_argument("--balance", type=float, default=1000.0)
     parser.add_argument("--xau", type=Path, default=None)
     parser.add_argument("--dxy", type=Path, default=None)
+    parser.add_argument("--utc-offset", type=int, default=2, help="Offset server export MT5 CSV terhadap UTC")
     parser.add_argument("--atr-relative", action="store_true", help="Gunakan spread & trail berbasis ATR (untuk 10-20 tahun)")
     args = parser.parse_args()
-    main(args.source, args.balance, args.xau, args.dxy, args.atr_relative)
+    main(args.source, args.balance, args.xau, args.dxy, args.atr_relative, utc_offset=args.utc_offset)

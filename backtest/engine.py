@@ -304,7 +304,11 @@ def simulate_trade_intrabar_m1(
         ask_low, ask_high = low + spread_usd, high + spread_usd
 
         if not filled:
-            if t_utc >= expiry_utc or not is_within_session_utc(t_utc, cfg.session_start_utc, session_end_hhmm):
+            cancel_on_session = cfg.entry_timeframe != "H1"
+            if t_utc >= expiry_utc or (
+                cancel_on_session
+                and not is_within_session_utc(t_utc, cfg.session_start_utc, session_end_hhmm)
+            ):
                 return TradeOutcome(False, direction, None, t_utc, limit_price, sl_price, tp_final_price, False, "CANCELLED", 0.0)
 
             if direction == "BUY":
@@ -379,7 +383,7 @@ class BacktestEngine:
         m5_df: pd.DataFrame,
         h1_df: pd.DataFrame,
         h4_df: pd.DataFrame,
-        dxy_h4: pd.DataFrame,
+        dxy_h4: Optional[pd.DataFrame],
         m1_df: Optional[pd.DataFrame] = None,
         news_history_df: Optional[pd.DataFrame] = None,
         initial_balance: float = 2000.0,
@@ -387,37 +391,54 @@ class BacktestEngine:
         m15_df: Optional[pd.DataFrame] = None,
     ) -> BacktestResult:
         """Jalankan backtest berurutan tanpa look-ahead bias (kompleksitas O(N))."""
-        if m5_df.empty:
+        is_h1_mode = self.cfg.entry_timeframe == "H1"
+        h1 = h1_df.sort_values("time_utc").reset_index(drop=True) if not h1_df.empty else h1_df
+        m5 = m5_df.sort_values("time_utc").reset_index(drop=True) if not m5_df.empty else m5_df
+        loop_df = h1 if is_h1_mode else m5
+        if loop_df.empty:
             return BacktestResult([], initial_balance, initial_balance, 0, 0.0, 0.0, 0.0, 0.0)
 
-        m5 = m5_df.sort_values("time_utc").reset_index(drop=True)
-        h1 = h1_df.sort_values("time_utc").reset_index(drop=True)
         h4 = h4_df.sort_values("time_utc").reset_index(drop=True)
-        dxy = dxy_h4.sort_values("time_utc").reset_index(drop=True)
-        m1 = (m1_df if m1_df is not None and not m1_df.empty else m5).sort_values("time_utc").reset_index(drop=True)
-        d1 = d1_df.sort_values("time_utc").reset_index(drop=True) if d1_df is not None and not d1_df.empty else None
+        dxy = (
+            dxy_h4.sort_values("time_utc").reset_index(drop=True)
+            if dxy_h4 is not None and not dxy_h4.empty
+            else pd.DataFrame(columns=["time_utc", "open", "high", "low", "close"])
+        )
+        m1 = (
+            m1_df.sort_values("time_utc").reset_index(drop=True)
+            if m1_df is not None and not m1_df.empty
+            else pd.DataFrame(columns=loop_df.columns)
+        )
+        if d1_df is not None and not d1_df.empty:
+            d1 = d1_df.sort_values("time_utc").reset_index(drop=True)
+        else:
+            from backtest.data_loader import resample_h1_to_higher_timeframes
+
+            d1 = resample_h1_to_higher_timeframes(h1)["D1"] if not h1.empty else None
         m15 = m15_df.sort_values("time_utc").reset_index(drop=True) if m15_df is not None and not m15_df.empty else None
 
-        m5_ns = pd.DatetimeIndex(m5["time_utc"]).as_unit("ns").asi8
-        h1_ns = pd.DatetimeIndex(h1["time_utc"]).as_unit("ns").asi8
-        h4_ns = pd.DatetimeIndex(h4["time_utc"]).as_unit("ns").asi8
-        dxy_ns = pd.DatetimeIndex(dxy["time_utc"]).as_unit("ns").asi8
-        m1_ns = pd.DatetimeIndex(m1["time_utc"]).as_unit("ns").asi8
-        d1_ns = pd.DatetimeIndex(d1["time_utc"]).as_unit("ns").asi8 if d1 is not None else None
+        loop_ns = pd.DatetimeIndex(loop_df["time_utc"]).as_unit("ns").asi8
+        h1_ns = pd.DatetimeIndex(h1["time_utc"]).as_unit("ns").asi8 if not h1.empty else np.array([], dtype="int64")
+        h4_ns = pd.DatetimeIndex(h4["time_utc"]).as_unit("ns").asi8 if not h4.empty else np.array([], dtype="int64")
+        dxy_ns = pd.DatetimeIndex(dxy["time_utc"]).as_unit("ns").asi8 if not dxy.empty else np.array([], dtype="int64")
+        m1_ns = pd.DatetimeIndex(m1["time_utc"]).as_unit("ns").asi8 if not m1.empty else np.array([], dtype="int64")
+        d1_ns = pd.DatetimeIndex(d1["time_utc"]).as_unit("ns").asi8 if d1 is not None and not d1.empty else None
         m15_ns = pd.DatetimeIndex(m15["time_utc"]).as_unit("ns").asi8 if m15 is not None else None
 
-        m5_times = pd.DatetimeIndex(m5["time_utc"]).tz_convert("UTC").to_pydatetime()
-        m5_lows = m5["low"].to_numpy(dtype=float)
-        m5_highs = m5["high"].to_numpy(dtype=float)
-        m5_closes = m5["close"].to_numpy(dtype=float)
-        m5_atr = compute_atr(m5, self.cfg.atr_period).to_numpy(dtype=float)
-        m5_spreads = (
-            m5["spread"].fillna(25.0).to_numpy(dtype=float)
-            if "spread" in m5.columns
-            else np.full(len(m5), 25.0)
+        loop_times = pd.DatetimeIndex(loop_df["time_utc"]).tz_convert("UTC").to_pydatetime()
+        loop_lows = loop_df["low"].to_numpy(dtype=float)
+        loop_highs = loop_df["high"].to_numpy(dtype=float)
+        loop_closes = loop_df["close"].to_numpy(dtype=float)
+        loop_atr = compute_atr(loop_df, self.cfg.atr_period).to_numpy(dtype=float)
+        loop_spreads = (
+            loop_df["spread"].fillna(25.0).to_numpy(dtype=float)
+            if "spread" in loop_df.columns
+            else np.full(len(loop_df), 25.0)
         )
         news_df = news_history_df if news_history_df is not None else pd.DataFrame()
-        news_note = _evaluate_news_coverage(m5_times[0], m5_times[-1], news_df)
+        news_note = _evaluate_news_coverage(loop_times[0], loop_times[-1], news_df)
+        if dxy.empty:
+            news_note += " | DXY: Tidak tersedia (pakai struktur murni XAUUSD)."
 
         sm = _InMemoryBacktestState()
         balance = initial_balance
@@ -430,12 +451,13 @@ class BacktestEngine:
         cached_h4_key: Optional[Tuple[int, int]] = None
         cached_macro: Tuple[Optional[float], BiasType, BiasType] = (None, "NEUTRAL", "NEUTRAL")
         cached_d1: Tuple[int, BiasType] = (-1, "NEUTRAL")
+        cached_zones_d1: Tuple[int, str, List[SupplyDemandZone]] = (-1, "", [])
         cached_zones_h4: Tuple[int, str, List[SupplyDemandZone]] = (-1, "", [])
         cached_zones_h1: Tuple[int, str, List[SupplyDemandZone]] = (-1, "", [])
 
         warmup = max(25, self.cfg.displacement_avg_period + 5)
-        for i in range(warmup, len(m5)):
-            now_utc = m5_times[i]
+        for i in range(warmup, len(loop_df)):
+            now_utc = loop_times[i]
             sm.increment_funnel(now_utc, "total_m5_bars", 1)
 
             if busy_until_utc is not None and now_utc < busy_until_utc:
@@ -449,22 +471,29 @@ class BacktestEngine:
             if not news_ok:
                 continue
 
-            cur_ns = int(m5_ns[i])
+            cur_ns = int(loop_ns[i])
             h4_idx = int(np.searchsorted(h4_ns, cur_ns, side="right"))
             dxy_idx = int(np.searchsorted(dxy_ns, cur_ns, side="right"))
             h1_idx = int(np.searchsorted(h1_ns, cur_ns, side="right"))
 
-            # Rolling window H4/H1 menjaga kompleksitas O(N) pada data 20 tahun
             h4_start = max(0, h4_idx - 250)
             dxy_start = max(0, dxy_idx - 250)
             h1_start = max(0, h1_idx - 400)
 
             if cached_h4_key != (h4_idx, dxy_idx):
                 xau_slice = h4.iloc[h4_start:h4_idx]
-                dxy_slice = dxy.iloc[dxy_start:dxy_idx]
-                corr = compute_rolling_correlation(xau_slice, dxy_slice, window=self.cfg.corr_window_h4)
+                dxy_slice = dxy.iloc[dxy_start:dxy_idx] if dxy_idx > 0 else dxy
+                corr = (
+                    compute_rolling_correlation(xau_slice, dxy_slice, window=self.cfg.corr_window_h4)
+                    if not dxy_slice.empty
+                    else None
+                )
                 xau_tr = infer_h4_structure_bias(xau_slice, pivot_window=self.cfg.pivot_window)
-                dxy_tr = infer_h4_structure_bias(dxy_slice, pivot_window=self.cfg.pivot_window)
+                dxy_tr = (
+                    infer_h4_structure_bias(dxy_slice, pivot_window=self.cfg.pivot_window)
+                    if not dxy_slice.empty
+                    else "NEUTRAL"
+                )
                 cached_macro = (corr, dxy_tr, xau_tr)
                 cached_h4_key = (h4_idx, dxy_idx)
 
@@ -473,7 +502,6 @@ class BacktestEngine:
             if not l1.passed or l1.bias is None:
                 continue
 
-            # Opsional filter Daily (D1) alignment bila diaktifkan di config
             if self.cfg.require_d1_alignment and d1 is not None and d1_ns is not None:
                 d1_idx = int(np.searchsorted(d1_ns, cur_ns, side="right"))
                 if cached_d1[0] != d1_idx:
@@ -486,7 +514,7 @@ class BacktestEngine:
 
             sm.increment_funnel(now_utc, "passed_session_news", 1)
 
-            atr_val = float(m5_atr[i])
+            atr_val = float(loop_atr[i])
             eff_cfg = (
                 replace(self.cfg, max_spread_usd=max(0.05, self.cfg.max_spread_atr_ratio * atr_val))
                 if self.cfg.max_spread_atr_ratio > 0 and atr_val > 0
@@ -494,7 +522,7 @@ class BacktestEngine:
             )
             guard = AntiGanasGuard(sm, eff_cfg)  # type: ignore[arg-type]
 
-            spread_usd = float(m5_spreads[i]) * self.point
+            spread_usd = float(loop_spreads[i]) * self.point
             dec = guard.check_pre_entry_gates(
                 now_utc=now_utc,
                 balance=balance,
@@ -515,33 +543,47 @@ class BacktestEngine:
                     l1.bias,
                     detect_bos_and_fresh_zones(h4.iloc[h4_start:h4_idx], "H4", l1.bias, self.cfg.pivot_window),
                 )
-            if cached_zones_h1[0] != h1_idx or cached_zones_h1[1] != l1.bias:
-                cached_zones_h1 = (
-                    h1_idx,
-                    l1.bias,
-                    detect_bos_and_fresh_zones(h1.iloc[h1_start:h1_idx], "H1", l1.bias, self.cfg.pivot_window),
+
+            if is_h1_mode:
+                candidate_zones: List[SupplyDemandZone] = list(cached_zones_h4[2])
+                if d1 is not None and d1_ns is not None:
+                    d1_idx = int(np.searchsorted(d1_ns, cur_ns, side="right"))
+                    d1_start = max(0, d1_idx - 120)
+                    if cached_zones_d1[0] != d1_idx or cached_zones_d1[1] != l1.bias:
+                        cached_zones_d1 = (
+                            d1_idx,
+                            l1.bias,
+                            detect_bos_and_fresh_zones(d1.iloc[d1_start:d1_idx], "D1", l1.bias, self.cfg.pivot_window),
+                        )
+                    candidate_zones = list(cached_zones_d1[2]) + candidate_zones
+                entry_slice = loop_df.iloc[max(0, i - 120) : i + 1]
+            else:
+                if cached_zones_h1[0] != h1_idx or cached_zones_h1[1] != l1.bias:
+                    cached_zones_h1 = (
+                        h1_idx,
+                        l1.bias,
+                        detect_bos_and_fresh_zones(h1.iloc[h1_start:h1_idx], "H1", l1.bias, self.cfg.pivot_window),
+                    )
+                candidate_zones = list(cached_zones_h4[2]) + list(cached_zones_h1[2])
+                cur_st = sm.get_strategy_state()
+                zone_tf = cur_st.zone_timeframe or "H1"
+                use_m15 = (
+                    self.cfg.entry_timeframe == "M15"
+                    or (self.cfg.entry_timeframe == "M15_OR_M5" and zone_tf == "H4")
                 )
+                if use_m15 and m15 is not None and m15_ns is not None:
+                    m15_idx = int(np.searchsorted(m15_ns, cur_ns, side="right"))
+                    entry_slice = m15.iloc[max(0, m15_idx - 120) : m15_idx]
+                else:
+                    entry_slice = loop_df.iloc[max(0, i - 120) : i + 1]
 
             active_zone = select_priority_touched_zone(
-                cached_zones_h4[2] + cached_zones_h1[2],
-                current_price=float(m5_closes[i]),
+                candidate_zones,
+                current_price=float(loop_closes[i]),
                 bias=l1.bias,
-                bar_low=float(m5_lows[i]),
-                bar_high=float(m5_highs[i]),
+                bar_low=float(loop_lows[i]),
+                bar_high=float(loop_highs[i]),
             )
-
-            # Pilih timeframe pemicu entry konsisten (M15_OR_M5: zona H4 -> M15, zona H1 -> M5)
-            cur_st = sm.get_strategy_state()
-            zone_tf = cur_st.zone_timeframe or (active_zone.timeframe if active_zone else "H1")
-            use_m15 = (
-                self.cfg.entry_timeframe == "M15"
-                or (self.cfg.entry_timeframe == "M15_OR_M5" and zone_tf == "H4")
-            )
-            if use_m15 and m15 is not None and m15_ns is not None:
-                m15_idx = int(np.searchsorted(m15_ns, cur_ns, side="right"))
-                entry_slice = m15.iloc[max(0, m15_idx - 120) : m15_idx]
-            else:
-                entry_slice = m5.iloc[max(0, i - 120) : i + 1]
 
             act = advance_smc_state_machine(
                 sm, entry_slice, active_zone=active_zone, now_utc=now_utc, in_session=True, cfg=eff_cfg  # type: ignore[arg-type]
@@ -558,14 +600,15 @@ class BacktestEngine:
                     sm.save_strategy_state(StrategyState(state="IDLE"))
                     continue
 
-                m1_start = int(np.searchsorted(m1_ns, cur_ns, side="right"))
-                horizon_ns = cur_ns + int(48 * 3600 * 1e9)
-                m1_end = int(np.searchsorted(m1_ns, horizon_ns, side="right"))
-                intrabar_slice = m1.iloc[m1_start:m1_end]
-                # Jika histori M1 broker tidak menjangkau bar ini, fallback ke bar M5
+                horizon_hours = 336 if is_h1_mode else max(48, self.cfg.pending_order_expiry_hours + 24)
+                horizon_ns = cur_ns + int(horizon_hours * 3600 * 1e9)
+                m1_start = int(np.searchsorted(m1_ns, cur_ns, side="right")) if len(m1_ns) > 0 else 0
+                m1_end = int(np.searchsorted(m1_ns, horizon_ns, side="right")) if len(m1_ns) > 0 else 0
+                intrabar_slice = m1.iloc[m1_start:m1_end] if m1_end > m1_start else pd.DataFrame()
+                # Jika histori M1 tidak menjangkau bar ini, fallback ke bar loop (M5 atau H1)
                 if intrabar_slice.empty:
-                    m5_end = int(np.searchsorted(m5_ns, horizon_ns, side="right"))
-                    intrabar_slice = m5.iloc[i + 1 : m5_end]
+                    loop_end = int(np.searchsorted(loop_ns, horizon_ns, side="right"))
+                    intrabar_slice = loop_df.iloc[i + 1 : loop_end]
                 outcome = simulate_trade_intrabar_m1(
                     direction=act.direction,
                     limit_price=act.limit_price,
@@ -597,7 +640,7 @@ class BacktestEngine:
                     busy_until_utc = outcome.exit_time_utc
                 sm.save_strategy_state(StrategyState(state="IDLE"))
 
-        funnel = sm.get_funnel_stats(m5_times[-1])
+        funnel = sm.get_funnel_stats(loop_times[-1])
         breakdown = _compute_5y_regime_breakdown(trades)
         if not trades:
             return BacktestResult(
@@ -636,6 +679,8 @@ def _resolve_macro_bias(
 ) -> Layer1Result:
     """Evaluasi bias DXY vs XAUUSD dari nilai korelasi H4 yang sudah di-cache."""
     if corr is None:
+        if cfg.allow_xau_only_when_dxy_unavailable and xau_trend != "NEUTRAL":
+            return Layer1Result(True, xau_trend, None, dxy_trend, xau_trend, "OK (XAUUSD murni)")
         return Layer1Result(False, None, None, dxy_trend, xau_trend, "Skipped: Korelasi NaN")
     dxy_inv: BiasType = "BUY" if dxy_trend == "SELL" else ("SELL" if dxy_trend == "BUY" else "NEUTRAL")
     if corr < cfg.corr_negative_threshold:

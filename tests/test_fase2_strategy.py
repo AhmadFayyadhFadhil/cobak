@@ -168,6 +168,7 @@ def test_layer3_state_machine_full_flow_fvg_timeout_and_in_position_isolation(tm
     """Uji transisi ZONE_ARMED -> SWEEP -> CHOCH -> PENDING, FVG timeout, session reset, & IN_POSITION kebal."""
     sm = StateManager(tmp_path / "state.db")
     cfg = BotConfig(
+        entry_timeframe="M5",
         pivot_window=2,
         zone_armed_timeout_hours=5.0,
         max_fvg_wait_candles_m5=3,

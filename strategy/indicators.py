@@ -56,11 +56,17 @@ def detect_confirmed_pivots(df: pd.DataFrame, window: int = 5) -> List[PivotPoin
     times = df["time_utc"].tolist()
     pivots: List[PivotPoint] = []
 
+    # Vektorisasi rolling max/min agar 100x lebih cepat untuk backtest 10-20 tahun
+    s_high = pd.Series(highs)
+    s_low = pd.Series(lows)
+    left_max = s_high.shift(1).rolling(window).max().to_numpy()
+    right_max = s_high.iloc[::-1].shift(1).rolling(window).max().iloc[::-1].to_numpy()
+    left_min = s_low.shift(1).rolling(window).min().to_numpy()
+    right_min = s_low.iloc[::-1].shift(1).rolling(window).min().iloc[::-1].to_numpy()
+
     # Batas atas `k` memastikan bar konfirmasi `k + window` sudah ada di slice `df`
     for k in range(window, n - window):
-        left_h = highs[k - window : k]
-        right_h = highs[k + 1 : k + window + 1]
-        if highs[k] > float(np.max(left_h)) and highs[k] >= float(np.max(right_h)):
+        if highs[k] > left_max[k] and highs[k] >= right_max[k]:
             pivots.append(
                 PivotPoint(
                     index=k,
@@ -70,10 +76,7 @@ def detect_confirmed_pivots(df: pd.DataFrame, window: int = 5) -> List[PivotPoin
                     time_utc=times[k],
                 )
             )
-
-        left_l = lows[k - window : k]
-        right_l = lows[k + 1 : k + window + 1]
-        if lows[k] < float(np.min(left_l)) and lows[k] <= float(np.min(right_l)):
+        if lows[k] < left_min[k] and lows[k] <= right_min[k]:
             pivots.append(
                 PivotPoint(
                     index=k,

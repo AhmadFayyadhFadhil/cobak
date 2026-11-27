@@ -12,7 +12,7 @@ import pandas as pd
 from strategy.indicators import detect_confirmed_pivots
 
 Direction = Literal["BUY", "SELL"]
-TimeframeLabel = Literal["H4", "H1"]
+TimeframeLabel = Literal["D1", "H4", "H1"]
 
 
 @dataclass(frozen=True)
@@ -142,7 +142,7 @@ def select_priority_touched_zone(
         return None
 
     def _sort_key(z: SupplyDemandZone) -> tuple[int, float, float]:
-        tf_rank = 0 if z.timeframe == "H4" else 1
+        tf_rank = {"D1": 0, "H4": 1, "H1": 2}.get(z.timeframe, 3)
         formed_ts = pd.Timestamp(z.formed_at_utc).timestamp()
         dist = abs(((z.low + z.high) / 2.0) - current_price)
         return (tf_rank, -formed_ts, dist)

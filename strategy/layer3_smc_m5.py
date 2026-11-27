@@ -166,19 +166,22 @@ def advance_smc_state_machine(
     last_high = float(m5_df["high"].iloc[-1]) if not m5_df.empty else 0.0
     last_low = float(m5_df["low"].iloc[-1]) if not m5_df.empty else 0.0
 
-    # 3. Reset pra-posisi jika sesi berakhir (> 16:00 UTC)
+    # 3. Reset pra-posisi jika sesi berakhir (> 16:00 UTC); untuk mode H1 pending dibiarkan sampai expiry
     if st.state in PRE_POSITION_STATES and not in_session:
-        was_pending = st.state == "PENDING"
-        state_manager.save_strategy_state(StrategyState(state="IDLE"))
-        if was_pending:
+        if st.state == "PENDING" and cfg.entry_timeframe == "H1":
+            pass
+        else:
+            was_pending = st.state == "PENDING"
+            state_manager.save_strategy_state(StrategyState(state="IDLE"))
+            if was_pending:
+                return SMCAction(
+                    action="CANCEL_PENDING",
+                    reason="Sesi aktif berakhir (>16:00 UTC): pending limit dibatalkan.",
+                )
             return SMCAction(
-                action="CANCEL_PENDING",
-                reason="Sesi aktif berakhir (>16:00 UTC): pending limit dibatalkan.",
+                action="RESET_IDLE",
+                reason="Sesi aktif berakhir (>16:00 UTC): state pra-posisi di-reset ke IDLE.",
             )
-        return SMCAction(
-            action="RESET_IDLE",
-            reason="Sesi aktif berakhir (>16:00 UTC): state pra-posisi di-reset ke IDLE.",
-        )
 
     # 4. Kelola state PENDING (expiry, hit 1:2 duluan, atau ekstrem sweep tertembus)
     if st.state == "PENDING":

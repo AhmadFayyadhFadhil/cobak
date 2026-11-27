@@ -143,11 +143,20 @@ class SniperEngineRunner:
             return
 
         tf_m5 = getattr(self.client.mt5, "TIMEFRAME_M5", 5)
+        tf_h1 = getattr(self.client.mt5, "TIMEFRAME_H1", 16385)
         m5_raw = self.client.fetch_rates_df(self._symbol, tf_m5, 160, offset_hours)
-        if len(m5_raw) < 20:
+        h1_raw = self.client.fetch_rates_df(self._symbol, tf_h1, 200, offset_hours)
+        if len(m5_raw) < 20 or len(h1_raw) < 20:
             return
         m5_closed = m5_raw.iloc[:-1].reset_index(drop=True)
-        latest_bar_ts = int(m5_closed["time_server"].iloc[-1])
+        xau_h1 = h1_raw.iloc[:-1].reset_index(drop=True)
+
+        # Jika entry_timeframe == "H1", evaluasi isNewBar pada candle H1 baru close
+        latest_bar_ts = (
+            int(xau_h1["time_server"].iloc[-1])
+            if self.cfg.entry_timeframe == "H1"
+            else int(m5_closed["time_server"].iloc[-1])
+        )
 
         bar_dec = self.guard.check_is_new_bar(latest_bar_ts)
         if not bar_dec.allowed:
@@ -160,13 +169,11 @@ class SniperEngineRunner:
 
         tf_d1 = getattr(self.client.mt5, "TIMEFRAME_D1", 16408)
         tf_h4 = getattr(self.client.mt5, "TIMEFRAME_H4", 16388)
-        tf_h1 = getattr(self.client.mt5, "TIMEFRAME_H1", 16385)
         tf_m15 = getattr(self.client.mt5, "TIMEFRAME_M15", 15)
 
         d1_raw = self.client.fetch_rates_df(self._symbol, tf_d1, 90, offset_hours)
         xau_d1 = d1_raw.iloc[:-1] if len(d1_raw) > 1 else d1_raw
         xau_h4 = self.client.fetch_rates_df(self._symbol, tf_h4, 160, offset_hours).iloc[:-1]
-        xau_h1 = self.client.fetch_rates_df(self._symbol, tf_h1, 200, offset_hours).iloc[:-1]
         m15_raw = self.client.fetch_rates_df(self._symbol, tf_m15, 160, offset_hours)
         xau_m15 = m15_raw.iloc[:-1] if len(m15_raw) > 1 else m15_raw
 
@@ -225,22 +232,39 @@ class SniperEngineRunner:
         self.state.increment_funnel(now_utc, "passed_spread", 1)
         self.state.increment_funnel(now_utc, "passed_dxy_corr", 1)
 
-        last_bar = m5_closed.iloc[-1]
-        active_zone = select_priority_touched_zone(
-            zones_h4 + zones_h1,
-            current_price=float(last_bar["close"]),
-            bias=l1.bias,
-            bar_low=float(last_bar["low"]),
-            bar_high=float(last_bar["high"]),
-        )
+        if self.cfg.entry_timeframe == "H1":
+            zones_d1 = (
+                detect_bos_and_fresh_zones(xau_d1, "D1", l1.bias, self.cfg.pivot_window)
+                if l1.bias is not None and not xau_d1.empty
+                else []
+            )
+            last_bar = xau_h1.iloc[-1]
+            active_zone = select_priority_touched_zone(
+                zones_d1 + zones_h4,
+                current_price=float(last_bar["close"]),
+                bias=l1.bias,
+                bar_low=float(last_bar["low"]),
+                bar_high=float(last_bar["high"]),
+            )
+            entry_df = xau_h1
+        else:
+            last_bar = m5_closed.iloc[-1]
+            active_zone = select_priority_touched_zone(
+                zones_h4 + zones_h1,
+                current_price=float(last_bar["close"]),
+                bias=l1.bias,
+                bar_low=float(last_bar["low"]),
+                bar_high=float(last_bar["high"]),
+            )
 
-        cur_st = self.state.get_strategy_state()
-        zone_tf = cur_st.zone_timeframe or (active_zone.timeframe if active_zone else "H1")
-        use_m15 = (
-            self.cfg.entry_timeframe == "M15"
-            or (self.cfg.entry_timeframe == "M15_OR_M5" and zone_tf == "H4")
-        )
-        entry_df = xau_m15 if (use_m15 and not xau_m15.empty) else m5_closed
+            cur_st = self.state.get_strategy_state()
+            zone_tf = cur_st.zone_timeframe or (active_zone.timeframe if active_zone else "H1")
+            use_m15 = (
+                self.cfg.entry_timeframe == "M15"
+                or (self.cfg.entry_timeframe == "M15_OR_M5" and zone_tf == "H4")
+            )
+            entry_df = xau_m15 if (use_m15 and not xau_m15.empty) else m5_closed
+
         act = advance_smc_state_machine(
             self.state, entry_df, active_zone=active_zone, now_utc=now_utc, in_session=in_session, cfg=self.cfg
         )

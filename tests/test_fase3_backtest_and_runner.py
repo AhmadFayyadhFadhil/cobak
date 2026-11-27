@@ -152,7 +152,15 @@ def test_backtest_engine_and_oos_pass_criteria(tmp_path: Path) -> None:
         }
     )
 
-    engine = BacktestEngine(BotConfig(corr_window_h4=20), point=0.01)
+    engine = BacktestEngine(
+        BotConfig(
+            corr_window_h4=20,
+            entry_timeframe="M5",
+            zone_armed_timeout_hours=5.0,
+            pending_order_expiry_hours=3.0,
+        ),
+        point=0.01,
+    )
     result = engine.run(
         m5_df=m5_df,
         h1_df=h1_df,
@@ -229,7 +237,12 @@ def test_walk_forward_limits_params_and_splits_rolling_windows() -> None:
             {"pivot_window": 4, "sl_atr_multiplier": 0.5, "zone_armed_timeout_hours": 5.0},
             {"pivot_window": 5, "sl_atr_multiplier": 0.6, "zone_armed_timeout_hours": 4.0},
         ],
-        base_cfg=BotConfig(corr_window_h4=20),
+        base_cfg=BotConfig(
+            corr_window_h4=20,
+            entry_timeframe="M5",
+            zone_armed_timeout_hours=5.0,
+            pending_order_expiry_hours=3.0,
+        ),
     )
     assert len(wf.windows) == 2
     assert wf.oos_criteria is not None

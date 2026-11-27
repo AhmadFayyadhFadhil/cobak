@@ -198,3 +198,36 @@ def test_data_loader_histdata_headerless_est_conversion(tmp_path: Path) -> None:
     assert len(df) == 2
     # 02:00 EST (UTC-5) == 07:00 UTC
     assert df["time_utc"].iloc[0] == pd.Timestamp("2020-01-02 07:00:00+00:00")
+
+
+def test_data_loader_mt5_tab_export_zero_spread_and_h1_backtest_mode(tmp_path: Path) -> None:
+    """Export tab-separated MT5 (<DATE> <TIME> ... <SPREAD>=0) & entry_timeframe=H1 berjalan bersih."""
+    import zipfile
+
+    tsv_content = (
+        "<DATE>\t<TIME>\t<OPEN>\t<HIGH>\t<LOW>\t<CLOSE>\t<TICKVOL>\t<VOL>\t<SPREAD>\n"
+        + "\n".join(
+            f"2020.01.{(i // 24) + 2:02d}\t{i % 24:02d}:00:00\t{1520 + i * 0.2:.2f}\t{1522 + i * 0.2:.2f}\t{1519 + i * 0.2:.2f}\t{1521 + i * 0.2:.2f}\t1000\t0\t0"
+            for i in range(100)
+        )
+    )
+    zip_path = tmp_path / "mt5_h1.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("XAUUSD_H1.csv", tsv_content)
+
+    h1_df = load_ohlcv_file(zip_path, default_spread_points=25.0, source_utc_offset_hours=2)
+    assert len(h1_df) == 100
+    assert (h1_df["spread"] == 25.0).all()
+
+    from backtest.data_loader import resample_h1_to_higher_timeframes
+
+    mtf = resample_h1_to_higher_timeframes(h1_df)
+    res = BacktestEngine(BotConfig(entry_timeframe="H1")).run(
+        m5_df=pd.DataFrame(),
+        h1_df=mtf["H1"],
+        h4_df=mtf["H4"],
+        dxy_h4=None,
+        d1_df=mtf["D1"],
+        initial_balance=2000.0,
+    )
+    assert res.funnel["total_m5_bars"] == len(mtf["H1"]) - 25

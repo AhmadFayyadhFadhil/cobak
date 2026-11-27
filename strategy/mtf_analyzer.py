@@ -111,7 +111,14 @@ def build_mtf_matrix(
         else 0
     )
     score = (aligned / 5.0) * 100.0
-    rec_tf = "M15" if cfg.entry_timeframe == "M15" else ("M15/M5" if cfg.entry_timeframe == "M15_OR_M5" else "M5")
+    if cfg.entry_timeframe == "H1":
+        rec_tf = "H1"
+    elif cfg.entry_timeframe == "M15":
+        rec_tf = "M15"
+    elif cfg.entry_timeframe == "M15_OR_M5":
+        rec_tf = "M15/M5"
+    else:
+        rec_tf = "M5"
 
     return MTFMatrixReport(
         snapshots=snapshots,
