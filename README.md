@@ -14,3 +14,7 @@ XAUUSD "Sniper" Quantitative Trading Engine (Python + MetaTrader 5).
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -v
 ```
+
+## Referensi Arsitektur & Dokumentasi Skill
+- Pemetaan skill & adaptasi (termasuk adaptasi selektif pola `TauricResearch/TradingAgents` untuk layer AI reasoning di Fase 4): [`docs/Skill AI – Project XAUUSD Sniper.xlsx`](docs/Skill%20AI%20%E2%80%93%20Project%20XAUUSD%20Sniper.xlsx)
+
