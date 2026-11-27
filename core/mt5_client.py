@@ -177,6 +177,12 @@ class MT5Client:
             return fallback_offset
 
         tick = self.mt5.symbol_info_tick(symbol)
+        # Cold-start setelah symbol_select: beri jeda singkat bila tick pertama belum masuk
+        for _ in range(3):
+            if tick is not None and getattr(tick, "time", 0) > 0:
+                break
+            self._sleep(0.25)
+            tick = self.mt5.symbol_info_tick(symbol)
         if tick is None or getattr(tick, "time", 0) <= 0:
             return fallback_offset
 

@@ -5,7 +5,13 @@ untuk XAUUSD dan instrumen DXY/ICE di terminal MT5 sebelum menjalankan Fase 3.
 from __future__ import annotations
 
 import argparse
+import sys
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+ROOT_DIR = str(Path(__file__).resolve().parent.parent)
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
 
 import MetaTrader5 as mt5  # type: ignore
 import pandas as pd
@@ -33,6 +39,13 @@ def inspect_symbol_history(
     print(f"\n--- Audit Historis: {symbol} (Target {years} tahun) ---")
     for tf_name, tf_code in TIMEFRAMES.items():
         rates = mt5.copy_rates_range(symbol, tf_code, start_srv, end_srv)
+        note = ""
+        if rates is None or len(rates) == 0:
+            for fallback_cnt in (100000, 50000, 20000, 5000):
+                rates = mt5.copy_rates_from_pos(symbol, tf_code, 0, fallback_cnt)
+                if rates is not None and len(rates) > 0:
+                    note = f" (fallback from_pos={fallback_cnt:,})"
+                    break
         if rates is None or len(rates) == 0:
             print(f"  {tf_name}: KOSONG / tidak tersedia di MT5!")
             continue
@@ -42,7 +55,7 @@ def inspect_symbol_history(
         span_days = (last_dt - first_dt).days
         print(
             f"  {tf_name}: {len(df):>7,} bar | {first_dt:%Y-%m-%d} s/d {last_dt:%Y-%m-%d} "
-            f"({span_days / 365.25:.2f} tahun) | spread_median={df['spread'].median():.1f} pts"
+            f"({span_days / 365.25:.2f} tahun) | spread_median={df['spread'].median():.1f} pts{note}"
         )
 
 
